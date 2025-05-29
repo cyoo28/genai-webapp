@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Sign Up</title>
+    <style>
+        body { font-family: sans-serif; }
+        .container { width: 300px; margin: 50px auto; border: 1px solid #ccc; padding: 20px; }
+        h2 { text-align: center; }
+        .error { color: red; margin-bottom: 10px; }
+        input[type=text], input[type=password], input[type=email] { width: 100%; padding: 10px; margin-bottom: 10px; border: 1px solid #ddd; box-sizing: border-box; }
+        button { background-color: #007bff; color: white; padding: 10px 15px; border: none; cursor: pointer; width: 100%; }
+        button:hover { opacity: 0.8; }
+        p a { text-decoration: none; color: blue; }
+        .forgot-password { text-align: center; margin-top: 10px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2>Sign Up</h2>
+        {% if error %}
+            <p class="error">{{ error }}</p>
+        {% endif %}
+        <form method="POST">
+            <input type="text" name="username" placeholder="Username" required>
+            <input type="password" name="password" placeholder="Password" required>
+            <input type="email" name="email" placeholder="Email" required>
+            <input type="email" name="confirm_email" placeholder="Confirm Email" required>
+            <button type="submit">Sign Up</button>
+        </form>
+        <p>Already have an account? <a href="{{ url_for('login') }}">Login</a></p>
+        <div class="forgot-password">
+            <a href="{{ url_for('forgot_password') }}">Forgot your password?</a>
+        </div>
+    </div>
+</body>
+</html>
