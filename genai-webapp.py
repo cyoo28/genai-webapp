@@ -34,7 +34,7 @@ config = GenerateContentConfig(
        )
 
 # initialize chat
-chat = client.chats.create(
+chatbot = client.chats.create(
     model=MODEL_ID,
     history=[],
     config=config
@@ -59,10 +59,14 @@ def login():
         username = request.form['username']
         password = request.form['password']
         if username in users and users[username] == password:
-            return render_template('chat.html', username=username)
+            return redirect(url_for('chat', username=username))
         else:
             return render_template('login.html', error='Invalid username or password')
     return render_template('login.html')
+
+@app.route('/logout')
+def logout():
+    return render_template('logout.html')
 
 @app.route('/signup', methods=['GET', 'POST'])
 def signup():
@@ -96,22 +100,20 @@ def forgot_password():
         return render_template('forgot_password.html', error='Email not found')
     return render_template('forgot_password.html')
 
-@app.route('/logout')
-def logout():
-    return render_template('logout.html')
+@app.route('/chat')
+def chat():
+    username = request.args.get('username')
+    return render_template('chat.html', username=username)
 
 @app.route('/send', methods=['POST'])
 def send_message():
     data = request.get_json()
     user_input = data.get('message', '')
-
     if not user_input:
         return jsonify({'error': 'Empty message'}), 400
-
     try:
-        response_stream = chat.send_message_stream(user_input)
-        response_text = "".join([chunk.text for chunk in response_stream])
-        return jsonify({'response': response_text})
+        response = chatbot.send_message(user_input)
+        return jsonify({'response': response.text})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
