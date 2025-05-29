@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-from flask import Flask, render_template, request, redirect, url_for
-import datetime
+from flask import Flask, render_template, request, redirect, url_for, jsonify
+import time
 
 from google import genai
 from google.genai.types import (
@@ -19,7 +19,7 @@ MODEL_ID = "gemini-2.0-flash-001"
 client = genai.Client(vertexai=True, project=PROJECT_ID, location=LOCATION)
 # model instructions
 system_instruction = """
-  You are a basic conversational assistant.
+  #You are a basic conversational assistant.
 """
 # model configuration
 config = GenerateContentConfig(
@@ -32,30 +32,13 @@ config = GenerateContentConfig(
         presence_penalty=0.0, # [float, -2.0, 2.0] negative values discourage use of new tokens while positive values encourage use of new tokens
         frequency_penalty=0.0, # [float, -2.0, 2.0] negative values encourage repetition of tokens while positive values discourage repetition of tokens
        )
-"""
+
 # initialize chat
 chat = client.chats.create(
     model=MODEL_ID,
     history=[],
     config=config
     )
-# start up chat loop
-while True:
-    # request user input
-    user_input = input("Enter your message (or 'exit'): ")
-    # if the user types 'exit' then stop the chat
-    if user_input.lower() == 'exit':
-        break
-    # send input to the model
-    response_stream = chat.send_message_stream(user_input)
-    print("User:", user_input)
-    print("Model (streaming):")
-    # stream model response
-    for chunk in response_stream:
-        print(chunk.text, end="", flush=True)
-    print()
-"""
-
 # set up flask webapp
 app = Flask(__name__)
 
@@ -76,7 +59,7 @@ def login():
         username = request.form['username']
         password = request.form['password']
         if username in users and users[username] == password:
-            return render_template('AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA.html', username=username, logged_in=True)
+            return render_template('chat.html', username=username)
         else:
             return render_template('login.html', error='Invalid username or password')
     return render_template('login.html')
@@ -113,11 +96,24 @@ def forgot_password():
         return render_template('forgot_password.html', error='Email not found')
     return render_template('forgot_password.html')
 
-
-
 @app.route('/logout')
 def logout():
-    return redirect(url_for('login'))
+    return render_template('logout.html')
+
+@app.route('/send', methods=['POST'])
+def send_message():
+    data = request.get_json()
+    user_input = data.get('message', '')
+
+    if not user_input:
+        return jsonify({'error': 'Empty message'}), 400
+
+    try:
+        response_stream = chat.send_message_stream(user_input)
+        response_text = "".join([chunk.text for chunk in response_stream])
+        return jsonify({'response': response_text})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
-   app.run()
+    app.run()

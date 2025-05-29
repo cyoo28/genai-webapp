@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Gemini Chat Assistant</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-100 h-screen flex items-center justify-center">
+  <div class="w-full max-w-2xl h-[90vh] flex flex-col bg-white rounded-xl shadow-lg overflow-hidden">
+    <div class="p-4 bg-blue-600 text-white text-xl font-semibold flex justify-between items-center">
+      <span>Gemini Assistant</span>
+      <div class="text-sm">
+        Logged in as <span id="username" class="font-bold">{{ username }}</span> |
+        <a href="{{ url_for('logout') }}" class="underline hover:text-gray-200">Logout</a>
+      </div>
+    </div>
+
+    <div id="chat-box" class="flex-1 p-4 space-y-4 overflow-y-auto">
+      <!-- Chat messages go here -->
+    </div>
+
+    <form id="chat-form" class="p-4 border-t border-gray-200 flex" onsubmit="sendMessage(event)">
+      <input 
+        id="message" 
+        type="text" 
+        placeholder="Type your message..." 
+        class="flex-1 p-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+        required 
+      />
+      <button 
+        type="submit" 
+        class="ml-2 px-4 py-2 bg-blue-600 text-white font-semibold rounded-lg hover:bg-blue-700"
+      >
+        Send
+      </button>
+    </form>
+  </div>
+
+  <script>
+    const chatBox = document.getElementById("chat-box");
+
+    async function sendMessage(event) {
+      event.preventDefault();
+
+      const input = document.getElementById("message");
+      const msg = input.value.trim();
+      if (!msg) return;
+
+      appendMessage("You", msg, "bg-gray-100", "text-right");
+      input.value = "";
+
+      const res = await fetch('/send', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ message: msg })
+      });
+
+      const data = await res.json();
+      if (data.response) {
+        appendMessage("Gemini", data.response, "bg-blue-100", "text-left");
+      } else {
+        appendMessage("Error", data.error, "bg-red-100", "text-left");
+      }
+    }
+
+    function appendMessage(sender, text, bgColor, alignment) {
+      const message = document.createElement("div");
+      message.className = `p-3 rounded-lg shadow ${bgColor} ${alignment} max-w-[80%]`;
+      message.innerHTML = `<strong>${sender}:</strong><br>${text}`;
+      
+      const wrapper = document.createElement("div");
+      wrapper.className = `w-full flex ${alignment === 'text-right' ? 'justify-end' : 'justify-start'}`;
+      wrapper.appendChild(message);
+
+      chatBox.appendChild(wrapper);
+      chatBox.scrollTop = chatBox.scrollHeight;
+    }
+  </script>
+</body>
+</html>
