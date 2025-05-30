@@ -3,7 +3,7 @@
 from flask import Flask, render_template, request, redirect, url_for, jsonify
 # import google related packages
 from google import genai
-from google.genai.types import GenerateContentConfig,
+from google.genai.types import GenerateContentConfig
 # set up genai client
 PROJECT_ID = "symphony-gce-dev-secops"
 LOCATION = "us-east4"
@@ -77,6 +77,9 @@ def signup():
         # error if the username is already in use
         if new_username in users:
             error = 'Username already exists'
+        # error if the email is already in use
+        if any(user["email"] == new_email for user in users.values()):
+            error = 'Email already in use'
         # error if the email confirmation does not match
         elif new_email != confirm_email:
             error = 'Emails do not match'
