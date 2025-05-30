@@ -1,17 +1,9 @@
 #!/usr/bin/env python3
+# import flask related packages
 from flask import Flask, render_template, request, redirect, url_for, jsonify
-import time
-
+# import google related packages
 from google import genai
-from google.genai.types import (
-    CreateCachedContentConfig,
-    EmbedContentConfig,
-    FunctionDeclaration,
-    GenerateContentConfig,
-    Part,
-    SafetySetting,
-    Tool,
-)
+from google.genai.types import GenerateContentConfig,
 # set up genai client
 PROJECT_ID = "symphony-gce-dev-secops"
 LOCATION = "us-east4"
@@ -32,7 +24,6 @@ config = GenerateContentConfig(
         presence_penalty=0.0, # [float, -2.0, 2.0] negative values discourage use of new tokens while positive values encourage use of new tokens
         frequency_penalty=0.0, # [float, -2.0, 2.0] negative values encourage repetition of tokens while positive values discourage repetition of tokens
        )
-
 # initialize chat
 chatbot = client.chats.create(
     model=MODEL_ID,
@@ -41,80 +32,109 @@ chatbot = client.chats.create(
     )
 # set up flask webapp
 app = Flask(__name__)
-
+# list of users (eventually store in aws s3)
 users = {
-    'cyoo': 'cyoo'
+    'cyoo': {'password': 'cyoo', 'email': 'cyoo@ixcloudsecurity.com'},
+    'iyoo': {'password': 'iyoo', 'email': 'iyoo@ixcloudsecurity.com'},
 }
-user_emails = {
-    'cyoo': 'cyoo@ixcloudsecurity.com',
-}
-
+# set route for landing page
 @app.route('/')
 def index():
+    # redirect to login page
     return redirect(url_for('login'))
-
+# set route for login page
 @app.route('/login', methods=['GET', 'POST'])
 def login():
+    # allow users to input username and password
     if request.method == 'POST':
         username = request.form['username']
         password = request.form['password']
-        if username in users and users[username] == password:
+        # check that the username/password is a valid login
+        if username in users and users[username]['password'] == password:
+            # if it is, redirect to the chat
             return redirect(url_for('chat', username=username))
         else:
+            # if not, stay on the login page and display error
             return render_template('login.html', error='Invalid username or password')
+    # render the login page
     return render_template('login.html')
-
+# set route for logout page
 @app.route('/logout')
 def logout():
+    # render the logout page (which redirects to the login)
     return render_template('logout.html')
-
+# set route for the signup page
 @app.route('/signup', methods=['GET', 'POST'])
 def signup():
+    # allow users to input username, password, and email
     if request.method == 'POST':
         new_username = request.form['username']
         new_password = request.form['password']
         new_email = request.form['email']
         confirm_email = request.form['confirm_email']
+        # check for errors
         error = None
+        # error if the username is already in use
         if new_username in users:
             error = 'Username already exists'
+        # error if the email confirmation does not match
         elif new_email != confirm_email:
             error = 'Emails do not match'
+        # error if one of the fields is not filled out
         elif not new_username or not new_email or not new_password:
             error = 'Please enter a username, email, and password'
+        # if there's an error
         if error:
+            # stay on the signup page and display error
             return render_template('signup.html', error=error)
         else:
-            users[new_username] = new_password
-            user_emails[new_username] = new_email
+            # if no error, create new user
+            users[new_username]['password'] = new_password
+            users[new_username]['email'] = new_email
+            # redirect to login page
             return redirect(url_for('login'))
+    # render signup page
     return render_template('signup.html')
-
+# set route for forgot password page
 @app.route('/forgot_password', methods=['GET', 'POST'])
 def forgot_password():
+    # allow users to input email
     if request.method == 'POST':
         email = request.form['email']
-        for username, user_email in user_emails.items():
-            if user_email == email:
-                return render_template('forgot_password_sent.html', email=email)
+        # check that the email exists in the userbase
+        if any(user["email"] == email for user in users.values()):
+            # if it does, then send an email (implement using ses)
+            return render_template('forgot_password_sent.html', email=email)
+        # if it does not, stay on forgot password page and display error
         return render_template('forgot_password.html', error='Email not found')
+    # render forgot password page
     return render_template('forgot_password.html')
-
+# set route for chat
 @app.route('/chat')
 def chat():
+    # get username when redirected to page
     username = request.args.get('username')
+    # render chat page
     return render_template('chat.html', username=username)
-
+# set backend for sending messages to gemini
 @app.route('/send', methods=['POST'])
 def send_message():
+    # extract json for incoming request
     data = request.get_json()
+    # extract message
     user_input = data.get('message', '')
+    # check that the message is not empty
     if not user_input:
+        # if it is, then return error
         return jsonify({'error': 'Empty message'}), 400
     try:
+        # if there is a message, try to send the message to chatbot
         response = chatbot.send_message(user_input)
+        # return the response
         return jsonify({'response': response.text})
+    # if there is an error while handling the message,
     except Exception as e:
+        # return the error
         return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
