@@ -5,7 +5,7 @@ from flask import Flask, render_template, request, redirect, url_for, jsonify
 from google import genai
 from google.genai.types import GenerateContentConfig
 # set up genai client
-PROJECT_ID = "symphony-gce-dev-secops"
+PROJECT_ID = "ix-sandbox"
 LOCATION = "us-east4"
 MODEL_ID = "gemini-2.0-flash-001"
 client = genai.Client(vertexai=True, project=PROJECT_ID, location=LOCATION)
