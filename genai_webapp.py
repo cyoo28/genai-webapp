@@ -1,14 +1,32 @@
 #!/usr/bin/env python3
-# import flask related packages
-from flask import Flask, render_template, request, redirect, url_for, jsonify
-# import google related packages
+# import packages
+import os
+import json
+import boto3
 from google import genai
 from google.genai.types import GenerateContentConfig
+from google.oauth2 import service_account
+from flask import Flask, render_template, request, redirect, url_for, jsonify, session
+import bcyrpt
+# define environment variables
+os.environ["awsProfile"] = "ix-dev" # aws profile for boto3 session
+os.environ["awsRegion"] = "us-east-1" # aws region for bot3 session
+os.environ["awsSecret"] = "gcp-genai-sa" # aws secret that contains gcp service account key
+os.environ["gcpProject"] = "ix-sandbox" # gcp project where vertex ai resources are enabled
+os.environ["gcpRegion"] = "us-east4" # gcp region where vertex ai resources are enabled
+os.environ["geminiModel"] = "gemini-2.0-flash-001" # gemini model used for chatbot
+# retrieve gcp service account key from aws secrets manager
+session = boto3.Session(profile_name=os.environ["awsProfile"], region_name=os.environ["awsRegion"])
+smClient = session.client("secretsmanager")
+response = smClient.get_secret_value(SecretId=os.environ["saSecret"])
+serviceAccountInfo = json.loads(response["SecretString"])
+# authenticate with gcloud service account
+credentials = service_account.Credentials.from_service_account_info(
+    serviceAccountInfo,
+    scopes=["https://www.googleapis.com/auth/cloud-platform"]
+    )
 # set up genai client
-PROJECT_ID = "ix-sandbox"
-LOCATION = "us-east4"
-MODEL_ID = "gemini-2.0-flash-001"
-client = genai.Client(vertexai=True, project=PROJECT_ID, location=LOCATION)
+client = genai.Client(vertexai=True, project=os.environ["gcpProject"], location=os.environ["gcpRegion"], credentials=credentials)
 # model instructions
 system_instruction = """
   #You are a basic conversational assistant.
@@ -26,17 +44,25 @@ config = GenerateContentConfig(
        )
 # initialize chat
 chatbot = client.chats.create(
-    model=MODEL_ID,
+    model=os.environ["geminiModel"],
     history=[],
     config=config
     )
 # set up flask webapp
 app = Flask(__name__)
-# list of users (eventually store in aws s3)
+# list of users (eventually store in aws rds)
 users = {
     'cyoo': {'password': 'cyoo', 'email': 'cyoo@ixcloudsecurity.com'},
     'iyoo': {'password': 'iyoo', 'email': 'iyoo@ixcloudsecurity.com'},
 }
+"""
+salt = bcrypt.gensalt()
+hashedpw = bcrypt.hashpw(b'password', salt)
+bcrypt.checkpw(b'input', b'hashedpw')
+
+# create proxy to ec2
+# use pymysql to access ssh
+"""
 # set route for landing page
 @app.route('/')
 def index():
