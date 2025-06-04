@@ -19,6 +19,7 @@ os.environ["geminiModel"] = "gemini-2.0-flash-001" # gemini model used for chatb
 os.environ["dbSecret"] = "mysql-db" # aws secret for MySQL db
 os.environ["dbName"] = "genai" # name of MySQL database
 os.environ["dbTable"] = "users" # table in MySQL database
+os.environ["appParam"] = "webappKey" # aws parameter for webapp session key
 # define a MySql class
 class MySQLClient:
     def __init__(self, host, user, password, db):
@@ -71,8 +72,8 @@ class MySQLClient:
         finally:
             self.disconnect(conn)
 # retrieve gcp service account key from aws secrets manager
-session = boto3.Session(profile_name=os.environ["awsProfile"], region_name=os.environ["awsRegion"])
-smClient = session.client("secretsmanager")
+awsSession = boto3.Session(profile_name=os.environ["awsProfile"], region_name=os.environ["awsRegion"])
+smClient = awsSession.client("secretsmanager")
 saResponse = smClient.get_secret_value(SecretId=os.environ["gcpSecret"])
 saInfo = json.loads(saResponse["SecretString"])
 # authenticate with gcloud service account
@@ -107,13 +108,23 @@ chatbot = genaiClient.chats.create(
 dbResponse = smClient.get_secret_value(SecretId=os.environ["dbSecret"])
 dbInfo = json.loads(dbResponse["SecretString"])
 sqlClient = MySQLClient("localhost", dbInfo["username"], dbInfo["password"], os.environ["dbName"])
+# retrieve webapp session key from aws parameter store
+ssmClient = awsSession.client("ssm")
+appResponse = ssmClient.get_parameter(Name=os.environ["appParam"], WithDecryption=True)
+appKey = appResponse["Parameter"]["Value"]
 # set up flask webapp
 app = Flask(__name__)
+app.secret_key = appKey
 # set route for landing page
 @app.route("/")
 def index():
-    # redirect to login page
-    return redirect(url_for("login"))
+    # check if the user has already signed in
+    if "username" in session:
+        # if they are, redirect to chat
+        return redirect(url_for("chat"))
+    # otherwise, redirect to login page
+    else:
+        return redirect(url_for("login"))
 # set route for login page
 @app.route("/login", methods=["GET", "POST"])
 def login():
@@ -126,8 +137,12 @@ def login():
         # check that the username/password is a valid login
         user = next((u for u in users if u['username'] == username), None)
         if user and bcrypt.checkpw(password.encode(), user["password"].encode()):
-            # if it is, redirect to the chat
-            return redirect(url_for("chat", username=username))
+            # set session
+            session["username"] = username
+            # session expires if browser is closed
+            session.permanent = False 
+            # redirect to the chat
+            return redirect(url_for("chat"))
         else:
             # if not, stay on the login page and display error
             return render_template("login.html", error="Invalid username or password")
@@ -136,6 +151,8 @@ def login():
 # set route for logout page
 @app.route("/logout")
 def logout():
+    # clear session
+    session.clear()
     # render the logout page (which redirects to the login)
     return render_template("logout.html")
 # set route for the signup page
@@ -196,8 +213,11 @@ def forgot_password():
 # set route for chat
 @app.route("/chat")
 def chat():
+    # check that user is logged in
+    if "username" not in session:
+        return redirect(url_for("login"))
     # get username when redirected to page
-    username = request.args.get("username")
+    username = session["username"]
     # render chat page
     return render_template("chat.html", username=username)
 # set backend for sending messages to gemini
