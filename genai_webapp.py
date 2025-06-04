@@ -9,6 +9,7 @@ from google.oauth2 import service_account
 from flask import Flask, render_template, request, redirect, url_for, jsonify, session
 import bcrypt
 import pymysql
+from threading import Lock
 # define environment variables
 os.environ["awsProfile"] = "ix-dev" # aws profile for boto3 session
 os.environ["awsRegion"] = "us-east-1" # aws region for bot3 session
@@ -71,6 +72,13 @@ class MySQLClient:
         # close the connection
         finally:
             self.disconnect(conn)
+# define a function to create a new chatbot
+def create_chatbot(model, history, config):
+    return genaiClient.chats.create(
+        model=model,
+        history=history,
+        config=config
+    )
 # retrieve gcp service account key from aws secrets manager
 awsSession = boto3.Session(profile_name=os.environ["awsProfile"], region_name=os.environ["awsRegion"])
 smClient = awsSession.client("secretsmanager")
@@ -98,12 +106,11 @@ config = GenerateContentConfig(
         presence_penalty=0.0, # [float, -2.0, 2.0] negative values discourage use of new tokens while positive values encourage use of new tokens
         frequency_penalty=0.0, # [float, -2.0, 2.0] negative values encourage repetition of tokens while positive values discourage repetition of tokens
        )
-# initialize chat
-chatbot = genaiClient.chats.create(
-    model=os.environ["geminiModel"],
-    history=[],
-    config=config
-    )
+# import history from RDS (not implemented yet)
+history = []
+# In-memory store for chatbots keyed by username
+userChatbots = {}
+chatbotsLock = Lock()
 # create MySQLdatabase instance in aws
 dbResponse = smClient.get_secret_value(SecretId=os.environ["dbSecret"])
 dbInfo = json.loads(dbResponse["SecretString"])
@@ -140,7 +147,10 @@ def login():
             # set session
             session["username"] = username
             # session expires if browser is closed
-            session.permanent = False 
+            session.permanent = False
+            # create new chatbot for user
+            with chatbotsLock:
+                userChatbots[username] = create_chatbot(os.environ["geminiModel"], history, config)
             # redirect to the chat
             return redirect(url_for("chat"))
         else:
@@ -151,6 +161,11 @@ def login():
 # set route for logout page
 @app.route("/logout")
 def logout():
+    username = session.get("username")
+    # delete chatbot
+    if username:
+        with chatbotsLock:
+            userChatbots.pop(username, None)
     # clear session
     session.clear()
     # render the logout page (which redirects to the login)
@@ -223,6 +238,12 @@ def chat():
 # set backend for sending messages to gemini
 @app.route("/send", methods=["POST"])
 def send_message():
+    # check for user's chatbot
+    username = session.get("username")
+    if not username or username not in userChatbots:
+        return jsonify({"error": "No active chat session"}), 403
+    # load chatbot
+    chatbot = userChatbots[username]
     # extract json for incoming request
     data = request.get_json()
     # extract message
