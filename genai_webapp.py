@@ -244,20 +244,16 @@ def signup():
             return redirect(url_for("login"))
     # render signup page
     return render_template("signup.html")
-
-
-
-
-
-
 # set route for forgot password page
 @app.route("/forgot_password", methods=["GET", "POST"])
 def forgot_password():
+    # get users from rds
+    users = sqlClient.read_table(os.environ["dbTable"])
     # allow users to input email
     if request.method == "POST":
         email = request.form["email"]
         # check that the email exists in the userbase
-        if any(user["email"] == email for user in users.values()):
+        if any(email == user["email"] for user in users):
             # if it does, then send an email (implement using ses)
             return render_template("forgot_password_sent.html", email=email)
         # if it does not, stay on forgot password page and display error
