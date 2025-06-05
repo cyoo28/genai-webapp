@@ -21,6 +21,7 @@ os.environ["dbSecret"] = "mysql-db" # aws secret for MySQL db
 os.environ["dbName"] = "genai" # name of MySQL database
 os.environ["dbTable"] = "users" # table in MySQL database
 os.environ["appParam"] = "webappKey" # aws parameter for webapp session key
+os.environ["s3Bucket"] = "026090555438-genai-chat" # aws bucket for chat history
 # define a MySql class
 class MySQLClient:
     def __init__(self, host, user, password, db):
@@ -72,13 +73,48 @@ class MySQLClient:
         # close the connection
         finally:
             self.disconnect(conn)
-# define a function to create a new chatbot
-def create_chatbot(model, history, config):
-    return genaiClient.chats.create(
-        model=model,
-        history=history,
-        config=config
-    )
+# define a s3 class
+class MyS3Client:
+    def __init__(self, session, bucket):
+        # save the bucket name
+        self.bucket = bucket
+        # create an s3 client
+        self.s3 = session.client("s3")
+    def chatRead(self, chatKey):
+        # retrieve the chat history
+        response = self.s3.get_object(Bucket=self.bucket, Key=chatKey)
+        chatJson = json.loads(response['Body'].read().decode('utf-8'))
+        chatHistory = []
+        for message in chatJson:
+            parts = [{"text": part} for part in message["parts"]]
+            chatHistory.append({
+                "role": message["role"],
+                "parts": parts
+            })
+        return chatHistory
+    def chatWrite(self, chatKey, chatHistory):
+        chatStr = []
+        for message in chatHistory:
+            parts = [part.text for part in message.parts]
+            chatStr.append({
+                "role": message.role,
+                "parts": parts
+            })
+        chatJson = json.dumps(chatStr).encode("utf-8")
+        # upload the chat history
+        self.s3.put_object(Bucket=self.bucket, Key=chatKey, Body=chatJson, ContentType="application/json")
+    def chatLookup(self, chatKey):
+        # try to retrive head of chat log
+        try:
+            response = self.s3.head_object(Bucket=self.bucket, Key=chatKey)
+            return response
+        except self.s3.exceptions.ClientError as e:
+            # if it doesn't exist return None
+            if e.response['Error']['Code'] == '404':
+                return None
+            # otherwise, something else went wrong
+            else:
+                raise
 # retrieve gcp service account key from aws secrets manager
 awsSession = boto3.Session(profile_name=os.environ["awsProfile"], region_name=os.environ["awsRegion"])
 smClient = awsSession.client("secretsmanager")
@@ -106,15 +142,15 @@ config = GenerateContentConfig(
         presence_penalty=0.0, # [float, -2.0, 2.0] negative values discourage use of new tokens while positive values encourage use of new tokens
         frequency_penalty=0.0, # [float, -2.0, 2.0] negative values encourage repetition of tokens while positive values discourage repetition of tokens
        )
-# import history from RDS (not implemented yet)
-history = []
 # In-memory store for chatbots keyed by username
 userChatbots = {}
 chatbotsLock = Lock()
-# create MySQLdatabase instance in aws
+# create MySQLClient instance in aws
 dbResponse = smClient.get_secret_value(SecretId=os.environ["dbSecret"])
 dbInfo = json.loads(dbResponse["SecretString"])
 sqlClient = MySQLClient("localhost", dbInfo["username"], dbInfo["password"], os.environ["dbName"])
+# create MyS3Client instance
+s3Client = MyS3Client(awsSession, os.environ["s3Bucket"])
 # retrieve webapp session key from aws parameter store
 ssmClient = awsSession.client("ssm")
 appResponse = ssmClient.get_parameter(Name=os.environ["appParam"], WithDecryption=True)
@@ -148,11 +184,8 @@ def login():
             session["username"] = username
             # session expires if browser is closed
             session.permanent = False
-            # create new chatbot for user
-            with chatbotsLock:
-                userChatbots[username] = create_chatbot(os.environ["geminiModel"], history, config)
             # redirect to the chat
-            return redirect(url_for("chat"))
+            return redirect(url_for("select_chat"))
         else:
             # if not, stay on the login page and display error
             return render_template("login.html", error="Invalid username or password")
@@ -211,6 +244,12 @@ def signup():
             return redirect(url_for("login"))
     # render signup page
     return render_template("signup.html")
+
+
+
+
+
+
 # set route for forgot password page
 @app.route("/forgot_password", methods=["GET", "POST"])
 def forgot_password():
@@ -225,6 +264,40 @@ def forgot_password():
         return render_template("forgot_password.html", error="Email not found")
     # render forgot password page
     return render_template("forgot_password.html")
+# set route for chat select
+@app.route("/select_chat")
+def select_chat():
+    # check that the user is logged in
+    if "username" not in session:
+        # if not, redirect back to login page
+        return redirect(url_for("login"))
+    # render select chat page
+    return render_template("select_chat.html")
+# set backend for selecting chat
+@app.route("/start_chat", methods=["POST"])
+def start_chat():
+    # retrieve the user's username
+    username = session.get("username")
+    # if not logged in, redirect back to login page
+    if not username:
+        return redirect(url_for("login"))
+    # retrieve user's choice
+    choice = request.form.get("chat_choice")  # "continue" or "new"
+    # set the s3 key using the user's username
+    s3Key = f"{username}.json"
+    # set the chat history appropriately
+    with chatbotsLock:
+        if choice=="continue" and s3Client.chatLookup(s3Key) is not None:
+            history = s3Client.chatRead(s3Key)
+        else:
+            history = []
+        # create a chatbot        
+        userChatbots[username] = genaiClient.chats.create(
+            model=os.environ["geminiModel"],
+            history=history,
+            config=config
+        )
+    return redirect(url_for("chat"))
 # set route for chat
 @app.route("/chat")
 def chat():
@@ -255,12 +328,15 @@ def send_message():
     try:
         # if there is a message, try to send the message to chatbot
         response = chatbot.send_message(userInput)
+        # write updated chat history to s3
+        chatKey = f"{username}.json"
+        chatHistory = chatbot.get_history()
+        s3Client.chatWrite(chatKey, chatHistory)
         # return the response
         return jsonify({"response": response.text})
     # if there is an error while handling the message,
     except Exception as e:
         # return the error
         return jsonify({"error": str(e)}), 500
-
 if __name__ == "__main__":
     app.run()
