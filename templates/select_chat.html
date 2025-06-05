@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <title>Select Chat</title>
+    <link rel="icon" href="{{ url_for('static', filename='chatbot.png') }}" type="image/jpeg">
+    <style>
+        body {
+            font-family: 'Segoe UI', sans-serif;
+            background-color: #f5f5f5;
+            color: #333;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+        }
+        .container {
+            background-color: #ffffff;
+            padding: 2rem;
+            border-radius: 12px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+            width: 100%;
+            max-width: 360px;
+            text-align: center;
+        }
+        h2 {
+            margin-bottom: 1.5rem;
+        }
+        button {
+            width: 100%;
+            padding: 0.75rem;
+            margin-bottom: 1rem;
+            border-radius: 8px;
+            border: none;
+            background-color: #4CAF50;
+            color: white;
+            font-weight: bold;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        p {
+            font-size: 0.9rem;
+        }
+        a {
+            color: #1976d2;
+            text-decoration: none;
+        }
+        a:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2>Welcome back, {{ session['username'] }}!</h2>
+        <form action="{{ url_for('start_chat') }}" method="post">
+            <button type="submit" name="chat_choice" value="continue">Continue Existing Chat</button>
+            <button type="submit" name="chat_choice" value="new">Start New Chat</button>
+        </form>
+        <p><a href="{{ url_for('logout') }}">Log out</a></p>
+    </div>
+</body>
+</html>
