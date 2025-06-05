@@ -10,8 +10,11 @@
   <div class="w-full max-w-2xl h-[90vh] flex flex-col bg-white rounded-xl shadow-lg overflow-hidden">
     <div class="p-4 bg-blue-600 text-white text-xl font-semibold flex justify-between items-center">
       <span>Gemini-Based Assistant</span>
-      <div class="text-sm">
-        Logged in as <span id="username" class="font-bold">{{ username }}</span> |
+      <div class="text-sm flex items-center space-x-2">
+        <span>Logged in as <span class="font-bold">{{ username }}</span></span>
+        <span class="text-white">|</span>
+        <a href="{{ url_for('select_chat') }}" class="underline hover:text-gray-200">Chat Selection</a>
+        <span class="text-white">|</span>
         <a href="{{ url_for('logout') }}" class="underline hover:text-gray-200">Logout</a>
       </div>
     </div>

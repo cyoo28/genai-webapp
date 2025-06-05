@@ -54,7 +54,22 @@ class MySQLClient:
             conn.commit()
             print(f"User '{username}' added successfully.")
         except Exception as e:
-            print(f"[ERROR] Failed to add student: {e}")
+            print(f"[ERROR] Failed to add user: {e}")
+        # close the connection
+        finally:
+            self.disconnect(conn)
+    def update_entry(self, username, hashedPassword, table):
+        # start a new connection
+        conn = self.connect()
+        # try to update a user
+        try:
+            with conn.cursor() as cursor:
+                sql = f"UPDATE {table} SET password = %s WHERE username = %s"
+                cursor.execute(sql, (hashedPassword, username))
+            conn.commit()
+            print(f"User '{username}' updated successfully.")
+        except Exception as e:
+            print(f"[ERROR] Failed to update user: {e}")
         # close the connection
         finally:
             self.disconnect(conn)
@@ -80,10 +95,10 @@ class MyS3Client:
         self.bucket = bucket
         # create an s3 client
         self.s3 = session.client("s3")
-    def chatRead(self, chatKey):
+    def chat_read(self, chatKey):
         # retrieve the chat history
         response = self.s3.get_object(Bucket=self.bucket, Key=chatKey)
-        chatJson = json.loads(response['Body'].read().decode('utf-8'))
+        chatJson = json.loads(response["Body"].read().decode("utf-8"))
         chatHistory = []
         for message in chatJson:
             parts = [{"text": part} for part in message["parts"]]
@@ -92,7 +107,7 @@ class MyS3Client:
                 "parts": parts
             })
         return chatHistory
-    def chatWrite(self, chatKey, chatHistory):
+    def chat_write(self, chatKey, chatHistory):
         chatStr = []
         for message in chatHistory:
             parts = [part.text for part in message.parts]
@@ -103,14 +118,14 @@ class MyS3Client:
         chatJson = json.dumps(chatStr).encode("utf-8")
         # upload the chat history
         self.s3.put_object(Bucket=self.bucket, Key=chatKey, Body=chatJson, ContentType="application/json")
-    def chatLookup(self, chatKey):
+    def chat_lookup(self, chatKey):
         # try to retrive head of chat log
         try:
             response = self.s3.head_object(Bucket=self.bucket, Key=chatKey)
             return response
         except self.s3.exceptions.ClientError as e:
             # if it doesn't exist return None
-            if e.response['Error']['Code'] == '404':
+            if e.response["Error"]["Code"] == "404":
                 return None
             # otherwise, something else went wrong
             else:
@@ -178,7 +193,7 @@ def login():
         username = request.form["username"]
         password = request.form["password"]
         # check that the username/password is a valid login
-        user = next((u for u in users if u['username'] == username), None)
+        user = next((u for u in users if u["username"] == username), None)
         if user and bcrypt.checkpw(password.encode(), user["password"].encode()):
             # set session
             session["username"] = username
@@ -260,6 +275,43 @@ def forgot_password():
         return render_template("forgot_password.html", error="Email not found")
     # render forgot password page
     return render_template("forgot_password.html")
+# set route for change password page
+@app.route("/change_password", methods=["GET", "POST"])
+def change_password():
+    # check that the user is logged in
+    if "username" not in session:
+        # if not, redirect back to login page
+        return redirect(url_for("login"))
+    # get users from rds
+    users = sqlClient.read_table(os.environ["dbTable"])
+    # get username when redirected to page
+    username = session["username"]
+    user = next((u for u in users if u["username"] == username), None)
+    email = user["email"]
+    if request.method == "POST":
+        oldPassword = request.form["oldPassword"]
+        newPassword = request.form["newPassword"]
+        confirmPassword = request.form["confirmPassword"]
+        # check for errors
+        error = None
+        # error if the current password is incorrect
+        if not bcrypt.checkpw(oldPassword.encode(), user["password"].encode()):
+            error = "Incorrect current password."
+        # error if the email confirmation does not match
+        if newPassword != confirmPassword:
+            error = "change_password.html"
+        if error:
+            return render_template('change_password.html', error=error)
+        else:
+            # generate salt to encrypt password
+            salt = bcrypt.gensalt()
+            # encrypt password
+            hashedPassword = bcrypt.hashpw(newPassword.encode(), salt)
+            # add new user to db
+            sqlClient.update_entry(username, hashedPassword, os.environ["dbTable"])
+            # redirect to login page
+            return redirect(url_for("select_chat"))
+    return render_template("change_password.html")
 # set route for chat select
 @app.route("/select_chat")
 def select_chat():
@@ -283,8 +335,8 @@ def start_chat():
     s3Key = f"{username}.json"
     # set the chat history appropriately
     with chatbotsLock:
-        if choice=="continue" and s3Client.chatLookup(s3Key) is not None:
-            history = s3Client.chatRead(s3Key)
+        if choice=="continue" and s3Client.chat_lookup(s3Key) is not None:
+            history = s3Client.cha_read(s3Key)
         else:
             history = []
         # create a chatbot        
@@ -327,7 +379,7 @@ def send_message():
         # write updated chat history to s3
         chatKey = f"{username}.json"
         chatHistory = chatbot.get_history()
-        s3Client.chatWrite(chatKey, chatHistory)
+        s3Client.chat_write(chatKey, chatHistory)
         # return the response
         return jsonify({"response": response.text})
     # if there is an error while handling the message,
