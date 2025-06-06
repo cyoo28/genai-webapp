@@ -8,8 +8,10 @@ from google.genai.types import GenerateContentConfig
 from google.oauth2 import service_account
 from flask import Flask, render_template, request, redirect, url_for, jsonify, session
 import bcrypt
-import pymysql
 from threading import Lock
+# import custom files
+from sqlClient import MySQLClient
+from s3Client import MyS3Client
 # define environment variables
 os.environ["awsProfile"] = "ix-dev" # aws profile for boto3 session
 os.environ["awsRegion"] = "us-east-1" # aws region for bot3 session
@@ -22,114 +24,32 @@ os.environ["dbName"] = "genai" # name of MySQL database
 os.environ["dbTable"] = "users" # table in MySQL database
 os.environ["appParam"] = "webappKey" # aws parameter for webapp session key
 os.environ["s3Bucket"] = "026090555438-genai-chat" # aws bucket for chat history
-# define a MySql class
-class MySQLClient:
-    def __init__(self, host, user, password, db):
-        # save MySQL database info
-        self.host=host
-        self.user=user
-        self.password=password
-        self.db=db
-    def connect(self):
-        # connect to the database
-        conn = pymysql.connect(
-            host=self.host,
-            user=self.user,
-            password=self.password,
-            db=self.db,
-            cursorclass=pymysql.cursors.DictCursor
-        )
-        return conn
-    def disconnect(self, conn):
-        # disconnect from the database
-        conn.close()
-    def add_entry(self, username, hashedPassword, email, table):
-        # start a new connection
-        conn = self.connect()
-        # try to add a new user
-        try:
-            with conn.cursor() as cursor:
-                sql = f"INSERT INTO {table} (username, password, email) VALUES (%s, %s, %s)"
-                cursor.execute(sql, (username, hashedPassword, email))
-            conn.commit()
-            print(f"User '{username}' added successfully.")
-        except Exception as e:
-            print(f"[ERROR] Failed to add user: {e}")
-        # close the connection
-        finally:
-            self.disconnect(conn)
-    def update_entry(self, username, hashedPassword, table):
-        # start a new connection
-        conn = self.connect()
-        # try to update a user
-        try:
-            with conn.cursor() as cursor:
-                sql = f"UPDATE {table} SET password = %s WHERE username = %s"
-                cursor.execute(sql, (hashedPassword, username))
-            conn.commit()
-            print(f"User '{username}' updated successfully.")
-        except Exception as e:
-            print(f"[ERROR] Failed to update user: {e}")
-        # close the connection
-        finally:
-            self.disconnect(conn)
-    def read_table(self, table):
-        # start a new connection
-        conn = self.connect()
-        # try to lookup all users
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute(f"SELECT * FROM {table}")
-                results = cursor.fetchall()
-                return results
-        except Exception as e:
-            print(f"[ERROR] Failed to read users: {e}")
-            return []
-        # close the connection
-        finally:
-            self.disconnect(conn)
-# define a s3 class
-class MyS3Client:
-    def __init__(self, session, bucket):
-        # save the bucket name
-        self.bucket = bucket
-        # create an s3 client
-        self.s3 = session.client("s3")
-    def chat_read(self, chatKey):
-        # retrieve the chat history
-        response = self.s3.get_object(Bucket=self.bucket, Key=chatKey)
-        chatJson = json.loads(response["Body"].read().decode("utf-8"))
-        chatHistory = []
-        for message in chatJson:
-            parts = [{"text": part} for part in message["parts"]]
-            chatHistory.append({
-                "role": message["role"],
-                "parts": parts
-            })
-        return chatHistory
-    def chat_write(self, chatKey, chatHistory):
-        chatStr = []
-        for message in chatHistory:
-            parts = [part.text for part in message.parts]
-            chatStr.append({
-                "role": message.role,
-                "parts": parts
-            })
-        chatJson = json.dumps(chatStr).encode("utf-8")
-        # upload the chat history
-        self.s3.put_object(Bucket=self.bucket, Key=chatKey, Body=chatJson, ContentType="application/json")
-    def chat_lookup(self, chatKey):
-        # try to retrive head of chat log
-        try:
-            response = self.s3.head_object(Bucket=self.bucket, Key=chatKey)
-            return response
-        except self.s3.exceptions.ClientError as e:
-            # if it doesn't exist return None
-            if e.response["Error"]["Code"] == "404":
-                return None
-            # otherwise, something else went wrong
-            else:
-                raise
+# define function to convert chat to model format
+def chat_from_json(chatObj):
+    # convert s3 object to json
+    chatJson = json.loads(chatObj)
+    # convert json format into model format
+    chatHistory = []
+    for message in chatJson:
+        parts = [{"text": part} for part in message["parts"]]
+        chatHistory.append({
+            "role": message["role"],
+            "parts": parts
+        })
+    return chatHistory   
+# define function to convert chat to json format
+def chat_to_json(chatHistory):
+    # convert model format into json format
+    chatJson = []
+    for message in chatHistory:
+        parts = [part.text for part in message.parts]
+        chatJson.append({
+            "role": message.role,
+            "parts": parts
+        })
+    # convert json to object for s3
+    chatObj = json.dumps(chatJson)
+    return chatObj
 # retrieve gcp service account key from aws secrets manager
 awsSession = boto3.Session(profile_name=os.environ["awsProfile"], region_name=os.environ["awsRegion"])
 smClient = awsSession.client("secretsmanager")
@@ -164,7 +84,7 @@ chatbotsLock = Lock()
 dbResponse = smClient.get_secret_value(SecretId=os.environ["dbSecret"])
 dbInfo = json.loads(dbResponse["SecretString"])
 sqlClient = MySQLClient("localhost", dbInfo["username"], dbInfo["password"], os.environ["dbName"])
-# create MyS3Client instance
+# create MyS3ChatHistory instance
 s3Client = MyS3Client(awsSession, os.environ["s3Bucket"])
 # retrieve webapp session key from aws parameter store
 ssmClient = awsSession.client("ssm")
@@ -332,11 +252,12 @@ def start_chat():
     # retrieve user's choice
     choice = request.form.get("chat_choice")  # "continue" or "new"
     # set the s3 key using the user's username
-    s3Key = f"{username}.json"
+    s3Key = f"chat-history/{username}.json"
     # set the chat history appropriately
     with chatbotsLock:
-        if choice=="continue" and s3Client.chat_lookup(s3Key) is not None:
-            history = s3Client.cha_read(s3Key)
+        if choice=="continue" and s3Client.obj_lookup(s3Key) is not None:
+            chatObj = s3Client.obj_read(s3Key)
+            history = chat_from_json(chatObj)
         else:
             history = []
         # create a chatbot        
@@ -377,9 +298,10 @@ def send_message():
         # if there is a message, try to send the message to chatbot
         response = chatbot.send_message(userInput)
         # write updated chat history to s3
-        chatKey = f"{username}.json"
+        chatKey = f"chat-history/{username}.json"
         chatHistory = chatbot.get_history()
-        s3Client.chat_write(chatKey, chatHistory)
+        chatObj = chat_to_json(chatHistory)
+        s3Client.obj_write(chatKey, chatObj, "application/json")
         # return the response
         return jsonify({"response": response.text})
     # if there is an error while handling the message,
