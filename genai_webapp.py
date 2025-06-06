@@ -8,6 +8,9 @@ from google.genai.types import GenerateContentConfig
 from google.oauth2 import service_account
 from flask import Flask, render_template, request, redirect, url_for, jsonify, session
 import bcrypt
+import io
+import sys
+import logging
 from threading import Lock
 # import custom files
 from sqlClient import MySQLClient
@@ -24,8 +27,14 @@ os.environ["dbName"] = "genai" # name of MySQL database
 os.environ["dbTable"] = "users" # table in MySQL database
 os.environ["appParam"] = "webappKey" # aws parameter for webapp session key
 os.environ["s3Bucket"] = "026090555438-genai-chat" # aws bucket for chat history
-# define function to convert chat to model format
-def chat_from_json(chatObj):
+# set up logging
+logging.basicConfig(stream=sys.stderr, 
+                    level=logging.INFO, 
+                    format="%(asctime)-11s [%(levelname)s] %(message)s (%(name)s:%(lineno)d)")
+logger = logging.getLogger(__name__)
+# define function to convert s3 object to model format
+def chat_from_obj(chatObj):
+    logger.debug(f"Converting s3 object to model format")
     # convert s3 object to json
     chatJson = json.loads(chatObj)
     # convert json format into model format
@@ -37,8 +46,9 @@ def chat_from_json(chatObj):
             "parts": parts
         })
     return chatHistory   
-# define function to convert chat to json format
-def chat_to_json(chatHistory):
+# define function to convert chat to s3 object
+def chat_to_obj(chatHistory):
+    logger.debug(f"Converting model format to s3 object")
     # convert model format into json format
     chatJson = []
     for message in chatHistory:
@@ -51,16 +61,19 @@ def chat_to_json(chatHistory):
     chatObj = json.dumps(chatJson)
     return chatObj
 # retrieve gcp service account key from aws secrets manager
+logger.debug(f"Getting service account key from AWS Secrets Manager")
 awsSession = boto3.Session(profile_name=os.environ["awsProfile"], region_name=os.environ["awsRegion"])
 smClient = awsSession.client("secretsmanager")
 saResponse = smClient.get_secret_value(SecretId=os.environ["gcpSecret"])
 saInfo = json.loads(saResponse["SecretString"])
 # authenticate with gcloud service account
+logger.debug(f"Authenticating GCP service account")
 credentials = service_account.Credentials.from_service_account_info(
     saInfo,
     scopes=["https://www.googleapis.com/auth/cloud-platform"]
     )
 # set up genai client
+logger.debug(f"Setting up genai client")
 genaiClient = genai.Client(vertexai=True, project=os.environ["gcpProject"], location=os.environ["gcpRegion"], credentials=credentials)
 # model instructions
 systemInstruction = """
@@ -81,17 +94,22 @@ config = GenerateContentConfig(
 userChatbots = {}
 chatbotsLock = Lock()
 # create MySQLClient instance in aws
+logger.debug(f"Getting database credentials from AWS Secrets Manager")
 dbResponse = smClient.get_secret_value(SecretId=os.environ["dbSecret"])
 dbInfo = json.loads(dbResponse["SecretString"])
+logger.debug(f"Setting up SQL client")
 sqlClient = MySQLClient("localhost", dbInfo["username"], dbInfo["password"], os.environ["dbName"])
 # create MyS3ChatHistory instance
+logger.debug(f"Setting up s3 client")
 s3Client = MyS3Client(awsSession, os.environ["s3Bucket"])
 # retrieve webapp session key from aws parameter store
+logger.debug(f"Getting webapp key from AWS Secrets Manager")
 ssmClient = awsSession.client("ssm")
 appResponse = ssmClient.get_parameter(Name=os.environ["appParam"], WithDecryption=True)
-appKey = appResponse["Parameter"]["Value"]
 # set up flask webapp
+logger.debug(f"Setting up webapp")
 app = Flask(__name__)
+appKey = appResponse["Parameter"]["Value"]
 app.secret_key = appKey
 # set route for landing page
 @app.route("/")
@@ -115,6 +133,7 @@ def login():
         # check that the username/password is a valid login
         user = next((u for u in users if u["username"] == username), None)
         if user and bcrypt.checkpw(password.encode(), user["password"].encode()):
+            logger.info(f"User {username} logged in successfully.")
             # set session
             session["username"] = username
             # session expires if browser is closed
@@ -122,6 +141,7 @@ def login():
             # redirect to the chat
             return redirect(url_for("select_chat"))
         else:
+            logger.warning(f"Failed login attempt for username: {username}")
             # if not, stay on the login page and display error
             return render_template("login.html", error="Invalid username or password")
     # render the login page
@@ -130,6 +150,7 @@ def login():
 @app.route("/logout")
 def logout():
     username = session.get("username")
+    logger.info(f"User {username} logged out.")
     # delete chatbot
     if username:
         with chatbotsLock:
@@ -165,10 +186,12 @@ def signup():
             error = "Please enter a username, email, and password"
         # if there's an error
         if error:
+            logger.warning(f"Failed signup attempt for username: {newUsername}")
             # stay on the signup page and display error
             return render_template("signup.html", error=error)
         # if no error,
         else:
+            logger.info(f"User {newUsername} signed up successfully.")
             # generate salt to encrypt password
             salt = bcrypt.gensalt()
             # encrypt password
@@ -221,8 +244,10 @@ def change_password():
         if newPassword != confirmPassword:
             error = "change_password.html"
         if error:
+            logger.warning(f"Failed password change attempt for username: {username}")
             return render_template('change_password.html', error=error)
         else:
+            logger.info(f"User {username} changed password successfully.")
             # generate salt to encrypt password
             salt = bcrypt.gensalt()
             # encrypt password
@@ -256,9 +281,11 @@ def start_chat():
     # set the chat history appropriately
     with chatbotsLock:
         if choice=="continue" and s3Client.obj_lookup(s3Key) is not None:
+            logger.info(f"User {username} is continuing an old chat.")
             chatObj = s3Client.obj_read(s3Key)
-            history = chat_from_json(chatObj)
+            history = chat_from_obj(chatObj)
         else:
+            logger.info(f"User {username} has started a new chat.")
             history = []
         # create a chatbot        
         userChatbots[username] = genaiClient.chats.create(
@@ -290,6 +317,7 @@ def send_message():
     data = request.get_json()
     # extract message
     userInput = data.get("message", "")
+    logger.info(f"User {username} sent message: {userInput}")
     # check that the message is not empty
     if not userInput:
         # if it is, then return error
@@ -297,16 +325,25 @@ def send_message():
     try:
         # if there is a message, try to send the message to chatbot
         response = chatbot.send_message(userInput)
+        logger.info(f"Model response for {username}: {response.text}")
         # write updated chat history to s3
         chatKey = f"chat-history/{username}.json"
         chatHistory = chatbot.get_history()
-        chatObj = chat_to_json(chatHistory)
+        chatObj = chat_to_obj(chatHistory)
         s3Client.obj_write(chatKey, chatObj, "application/json")
         # return the response
         return jsonify({"response": response.text})
     # if there is an error while handling the message,
     except Exception as e:
+        logger.error(f"Error processing message for {username}: {e}", exc_info=True)
         # return the error
         return jsonify({"error": str(e)}), 500
+# create a global error handler
+@app.errorhandler(Exception)
+def handle_exception(e):
+    logger.error("Unhandled exception occurred", exc_info=True)
+    return jsonify({"error": "An internal server error occurred"}), 500
+
 if __name__ == "__main__":
+    logger.info("Starting Flask app on http://127.0.0.1:5000")
     app.run()
