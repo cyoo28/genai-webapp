@@ -8,7 +8,6 @@ from google.genai.types import GenerateContentConfig
 from google.oauth2 import service_account
 from flask import Flask, render_template, request, redirect, url_for, jsonify, session
 import bcrypt
-import io
 import sys
 import logging
 from threading import Lock
