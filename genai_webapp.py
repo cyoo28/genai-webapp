@@ -22,6 +22,7 @@ os.environ["gcpProject"] = "ix-sandbox" # gcp project where vertex ai resources 
 os.environ["gcpRegion"] = "us-east4" # gcp region where vertex ai resources are enabled
 os.environ["geminiModel"] = "gemini-2.0-flash-001" # gemini model used for chatbot
 os.environ["dbSecret"] = "mysql-db" # aws secret for MySQL db
+os.environ["dbHost"] = os.environ.get("DBHOST", "genai-db.c16o2ig6ufoe.us-east-1.rds.amazonaws.com") # name of db host
 os.environ["dbName"] = "genai" # name of MySQL database
 os.environ["dbTable"] = "users" # table in MySQL database
 os.environ["appParam"] = "webappKey" # aws parameter for webapp session key
@@ -97,7 +98,7 @@ logger.debug(f"Getting database credentials from AWS Secrets Manager")
 dbResponse = smClient.get_secret_value(SecretId=os.environ["dbSecret"])
 dbInfo = json.loads(dbResponse["SecretString"])
 logger.debug(f"Setting up SQL client")
-sqlClient = MySQLClient("localhost", dbInfo["username"], dbInfo["password"], os.environ["dbName"])
+sqlClient = MySQLClient(os.environ["dbHost"], dbInfo["username"], dbInfo["password"], os.environ["dbName"])
 # create MyS3ChatHistory instance
 logger.debug(f"Setting up s3 client")
 s3Client = MyS3Client(awsSession, os.environ["s3Bucket"])
