@@ -63,9 +63,9 @@ class MySQLClient:
                 # get the keys and values for the entry
                 columns = ', '.join(entry.keys())
                 placeholders = ', '.join(['%s']*len(entry))
-                values = tuple(entry.values())
+                params = tuple(entry.values())
                 sql = f"INSERT INTO {table} ({columns}) VALUES ({placeholders})"
-                cursor.execute(sql, values)
+                cursor.execute(sql, params)
             conn.commit()
             logger.debug("Entry added successfully.")
         except Exception as e:
@@ -90,6 +90,24 @@ class MySQLClient:
             logger.debug(f"Entry updated successfully.")
         except Exception as e:
             logger.error(f"Failed to update entry: {e}", exc_info=True)
+            raise
+        # close the connection
+        finally:
+            self.disconnect(conn)
+    def remove_entry(self, filters, table):
+        logger.debug(f"Removing entry in table: {table}")
+        # start a new connection
+        conn = self.connect()
+        # try to remove a user
+        try:
+            with conn.cursor() as cursor:
+                filterColumns = " AND ".join(f"{col} = %s" for col in filters.keys())
+                params = tuple(filters.values())
+                sql = f"DELETE FROM {table} WHERE {filterColumns}"
+                cursor.execute(sql, params)
+            logger.debug(f"Entry removed successfully.")
+        except Exception as e:
+            logger.error(f"Failed to remove entry: {e}", exc_info=True)
             raise
         # close the connection
         finally:
