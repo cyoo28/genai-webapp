@@ -27,7 +27,7 @@ os.environ["dbSecret"] = "mysql-db" # aws secret for MySQL db
 os.environ["dbHost"] = os.environ.get("DBHOST", "genai-db.c16o2ig6ufoe.us-east-1.rds.amazonaws.com") # name of db host
 os.environ["dbName"] = "genai" # name of MySQL database
 os.environ["userTable"] = "users" # table with user info in MySQL database
-os.environ["tokenTable"] = "users" # table with password reset tokens in MySQL database
+os.environ["resetTable"] = "password_reset" # table with password reset tokens in MySQL database
 os.environ["appParam"] = "webappKey" # aws parameter for webapp session key
 os.environ["s3Bucket"] = "026090555438-genai-chat" # aws bucket for chat history
 # set up logging
@@ -225,7 +225,7 @@ def forgot_password():
             expires = (datetime.now() + timedelta(minutes=10)).strftime('%Y-%m-%d %H:%M:%S')
             # format reset information into dict with sql columns as keys
             resetInfo = {"user": matchedUser["username"], "token": token, "expiration": expires}
-            sqlClient.add_entry(resetInfo, os.environ["tokenTable"])
+            sqlClient.add_entry(resetInfo, os.environ["resetTable"])
             # send an email (implement using ses)
             return render_template("forgot_password_sent.html", email=email)
         # if it does not,
