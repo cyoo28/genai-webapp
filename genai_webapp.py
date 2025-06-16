@@ -8,6 +8,8 @@ from google.genai.types import GenerateContentConfig
 from google.oauth2 import service_account
 from flask import Flask, render_template, request, redirect, url_for, jsonify, session
 import bcrypt
+import secrets
+from datetime import datetime, timedelta
 import sys
 import logging
 from threading import Lock
@@ -24,7 +26,8 @@ os.environ["geminiModel"] = "gemini-2.0-flash-001" # gemini model used for chatb
 os.environ["dbSecret"] = "mysql-db" # aws secret for MySQL db
 os.environ["dbHost"] = os.environ.get("DBHOST", "genai-db.c16o2ig6ufoe.us-east-1.rds.amazonaws.com") # name of db host
 os.environ["dbName"] = "genai" # name of MySQL database
-os.environ["dbTable"] = "users" # table in MySQL database
+os.environ["userTable"] = "users" # table with user info in MySQL database
+os.environ["tokenTable"] = "users" # table with password reset tokens in MySQL database
 os.environ["appParam"] = "webappKey" # aws parameter for webapp session key
 os.environ["s3Bucket"] = "026090555438-genai-chat" # aws bucket for chat history
 # set up logging
@@ -125,7 +128,7 @@ def index():
 @app.route("/login", methods=["GET", "POST"])
 def login():
     # get users from rds
-    users = sqlClient.read_table(os.environ["dbTable"])
+    users = sqlClient.read_table(os.environ["userTable"])
     # allow users to input username and password
     if request.method == "POST":
         username = request.form["username"]
@@ -133,12 +136,12 @@ def login():
         # check that the username/password is a valid login
         user = next((u for u in users if u["username"] == username), None)
         if user and bcrypt.checkpw(password.encode(), user["password"].encode()):
-            logger.info(f"User {username} logged in successfully.")
             # set session
             session["username"] = username
             # session expires if browser is closed
             session.permanent = False
             # redirect to the chat
+            logger.info(f"User {username} logged in successfully.")
             return redirect(url_for("select_chat"))
         else:
             logger.warning(f"Failed login attempt for username: {username}")
@@ -163,7 +166,7 @@ def logout():
 @app.route("/signup", methods=["GET", "POST"])
 def signup():
     # get users from rds
-    users = sqlClient.read_table(os.environ["dbTable"])
+    users = sqlClient.read_table(os.environ["userTable"])
     # allow users to input username, password, and email
     if request.method == "POST":
         newUsername = request.form["username"]
@@ -191,13 +194,15 @@ def signup():
             return render_template("signup.html", error=error)
         # if no error,
         else:
-            logger.info(f"User {newUsername} signed up successfully.")
             # generate salt to encrypt password
             salt = bcrypt.gensalt()
             # encrypt password
             hashedPassword = bcrypt.hashpw(newPassword.encode(), salt)
+            # format user into dict with sql columns as keys
+            user = {"username": newUsername, "password": hashedPassword, "email": newEmail}
             # add new user to db
-            sqlClient.add_entry(newUsername, hashedPassword, newEmail, os.environ["dbTable"])
+            sqlClient.add_entry(user, os.environ["userTable"])
+            logger.info(f"User {newUsername} signed up successfully.")
             # redirect to login page
             return redirect(url_for("login"))
     # render signup page
@@ -206,16 +211,27 @@ def signup():
 @app.route("/forgot_password", methods=["GET", "POST"])
 def forgot_password():
     # get users from rds
-    users = sqlClient.read_table(os.environ["dbTable"])
+    users = sqlClient.read_table(os.environ["userTable"])
     # allow users to input email
     if request.method == "POST":
         email = request.form["email"]
-        # check that the email exists in the userbase
-        if any(email == user["email"] for user in users):
-            # if it does, then send an email (implement using ses)
+        # find the user with the matching email
+        matchedUser = next((user for user in users if user["email"] == email), None)
+        # if the email exists in the userbase
+        if matchedUser:
+            # generate a token
+            token = secrets.token_urlsafe(32)
+            # and set its expiration date
+            expires = (datetime.now() + timedelta(minutes=10)).strftime('%Y-%m-%d %H:%M:%S')
+            # format reset information into dict with sql columns as keys
+            resetInfo = {"user": matchedUser["username"], "token": token, "expiration": expires}
+            sqlClient.add_entry(resetInfo, os.environ["tokenTable"])
+            # send an email (implement using ses)
             return render_template("forgot_password_sent.html", email=email)
-        # if it does not, stay on forgot password page and display error
-        return render_template("forgot_password.html", error="Email not found")
+        # if it does not,
+        else:
+            # stay on forgot password page and display error
+            return render_template("forgot_password.html", error="Email not found")
     # render forgot password page
     return render_template("forgot_password.html")
 # set route for change password page
@@ -226,7 +242,7 @@ def change_password():
         # if not, redirect back to login page
         return redirect(url_for("login"))
     # get users from rds
-    users = sqlClient.read_table(os.environ["dbTable"])
+    users = sqlClient.read_table(os.environ["userTable"])
     # get username when redirected to page
     username = session["username"]
     user = next((u for u in users if u["username"] == username), None)
@@ -247,13 +263,16 @@ def change_password():
             logger.warning(f"Failed password change attempt for username: {username}")
             return render_template('change_password.html', error=error)
         else:
-            logger.info(f"User {username} changed password successfully.")
             # generate salt to encrypt password
             salt = bcrypt.gensalt()
             # encrypt password
             hashedPassword = bcrypt.hashpw(newPassword.encode(), salt)
+            # format change information into dict with sql columns as keys
+            updateValues  = {"password": hashedPassword}
+            filters = {"username": username}
             # add new user to db
-            sqlClient.update_entry(username, hashedPassword, os.environ["dbTable"])
+            sqlClient.update_entry(updateValues, filters, os.environ["userTable"])
+            logger.info(f"User {username} changed password successfully.")
             # redirect to login page
             return redirect(url_for("select_chat"))
     return render_template("change_password.html")
