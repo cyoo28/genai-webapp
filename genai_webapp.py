@@ -148,7 +148,8 @@ def login():
             # if not, stay on the login page and display error
             return render_template("login.html", error="Invalid username or password")
     # render the login page
-    return render_template("login.html")
+    error = request.args.get("error")
+    return render_template("login.html", error=error)
 # set route for logout page
 @app.route("/logout")
 def logout():
@@ -232,13 +233,64 @@ def forgot_password():
             # add new reset info
             sqlClient.add_entry(resetInfo, os.environ["resetTable"])
             # send an email (implement using ses)
-            return render_template("forgot_password_sent.html", email=email)
+            return render_template("forgot_password_success.html", email=email)
         # if it does not,
         else:
             # stay on forgot password page and display error
             return render_template("forgot_password.html", error="Email not found")
     # render forgot password page
     return render_template("forgot_password.html")
+# set route for reset password page
+@app.route("/reset_password", methods=["GET", "POST"])
+def reset_password():
+    # get token from url
+    token = request.args.get("token")
+    # get reset tokens from rds
+    resetTokens = sqlClient.read_table(os.environ["resetTable"])
+    # check that the reset token exists
+    tokenEntry = next((row for row in resetTokens if row["token"] == token), None)
+    # check for errors
+    error = None
+    # error if no token is in the url or it doesn't exist in the table or if the token is expired
+    if not token or not tokenEntry or datetime.now() > tokenEntry["expiration"]:
+        logger.warning(f"Failed password reset attempt")
+        # stay on the signup page and display error
+        return redirect(url_for("login", error="Password reset attempt expired. Try requesting again"))
+    # if no error,
+    if request.method == "POST":
+        # allow users to input new password
+        newPassword = request.form["password"]
+        confirmPassword = request.form["confirmPassword"]
+        # check for errors
+        error = None
+        # error if one of the fields is not filled out
+        if not newPassword or not confirmPassword:
+            error = "Please enter email and confirmation"
+        # error if the email confirmation does not match
+        elif newPassword != confirmPassword:
+            error = "Passwords do not match"
+        # if there's an error
+        if error:
+            # stay on the signup page and display error
+            return redirect(url_for("login", error=error))
+        # if no error
+        else:
+            # generate salt to encrypt password
+            salt = bcrypt.gensalt()
+            # encrypt password
+            hashedPassword = bcrypt.hashpw(newPassword.encode(), salt)
+            # format reset information into dict with sql columns as keys
+            updateValues = {"password": hashedPassword}
+            filters = {"username": tokenEntry["user"]}
+            # update password for user in db
+            sqlClient.update_entry(updateValues, filters, os.environ["userTable"])
+            # delete the token after successful reset
+            sqlClient.delete_entry({"token": token}, os.environ["resetTable"])
+            logger.info(f"Password reset successfully for user: {tokenEntry['user']}")
+            # render success page
+            return render_template("reset_password_success.html")
+    # render reset password page
+    return render_template("reset_password.html")
 # set route for change password page
 @app.route("/change_password", methods=["GET", "POST"])
 def change_password():
@@ -275,7 +327,7 @@ def change_password():
             # format change information into dict with sql columns as keys
             updateValues  = {"password": hashedPassword}
             filters = {"username": username}
-            # add new user to db
+            # update password for user in db
             sqlClient.update_entry(updateValues, filters, os.environ["userTable"])
             logger.info(f"User {username} changed password successfully.")
             # redirect to login page
