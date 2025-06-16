@@ -28,6 +28,7 @@ os.environ["dbHost"] = os.environ.get("DBHOST", "genai-db.c16o2ig6ufoe.us-east-1
 os.environ["dbName"] = "genai" # name of MySQL database
 os.environ["userTable"] = "users" # table with user info in MySQL database
 os.environ["resetTable"] = "password_reset" # table with password reset tokens in MySQL database
+os.environ["confirmTable"] = "confirmation" # table with confirmation tokens in MySQL database
 os.environ["appParam"] = "webappKey" # aws parameter for webapp session key
 os.environ["s3Bucket"] = "026090555438-genai-chat" # aws bucket for chat history
 # set up logging
@@ -135,7 +136,21 @@ def login():
         password = request.form["password"]
         # check that the username/password is a valid login
         user = next((u for u in users if u["username"] == username), None)
-        if user and bcrypt.checkpw(password.encode(), user["password"].encode()):
+        # check for errors
+        error = None
+        # error if username or password is incorrect
+        if not (user and bcrypt.checkpw(password.encode(), user["password"].encode())):
+            error = "Invalid username or password"
+        # error if user email has not been confirmed
+        elif not user["confirmed"]:
+            error = "User email has not been confirmed"
+        # if there is an error,
+        if error:
+            # stay on the login page and display error
+            logger.warning(f"Failed login attempt for username: {username}")
+            return render_template("login.html", error=error)
+        # otherwise, it is a successful login
+        else:
             # set session
             session["username"] = username
             # session expires if browser is closed
@@ -143,10 +158,6 @@ def login():
             # redirect to the chat
             logger.info(f"User {username} logged in successfully.")
             return redirect(url_for("select_chat"))
-        else:
-            logger.warning(f"Failed login attempt for username: {username}")
-            # if not, stay on the login page and display error
-            return render_template("login.html", error="Invalid username or password")
     # render the login page
     error = request.args.get("error")
     return render_template("login.html", error=error)
@@ -199,15 +210,45 @@ def signup():
             salt = bcrypt.gensalt()
             # encrypt password
             hashedPassword = bcrypt.hashpw(newPassword.encode(), salt)
+            # generate a confirmation token
+            token = secrets.token_urlsafe(32)
+            # and set its expiration date
+            expires = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d %H:%M:%S')
             # format user into dict with sql columns as keys
-            user = {"username": newUsername, "password": hashedPassword, "email": newEmail}
+            user = {"username": newUsername, "password": hashedPassword, "email": newEmail, "confirmed": False}
+            confirmInfo = {"username": newUsername, "token": token, "expiration": expires}
             # add new user to db
+            sqlClient.add_entry(confirmInfo, os.environ["confirmTable"])
             sqlClient.add_entry(user, os.environ["userTable"])
             logger.info(f"User {newUsername} signed up successfully.")
             # redirect to login page
             return redirect(url_for("login"))
     # render signup page
     return render_template("signup.html")
+# set route for email confirmation page
+@app.route("/confirm_email")
+def confirm_email():
+    # get token from url
+    token = request.args.get("token")
+    # get confirmation tokens from rds
+    confirmTokens = sqlClient.read_table(os.environ["confirmTable"])
+    # check that the reset token exists
+    tokenEntry = next((row for row in confirmTokens if row["token"] == token), None)
+    # error if no token is in the url or it doesn't exist in the table or if the token is expired
+    if not token or not tokenEntry or datetime.now() > tokenEntry["expiration"]:
+        logger.warning(f"Failed email confirmation attempt")
+        # stay on the signup page and display error
+        return redirect(url_for("login", error="Email confirmation has expired. Try signing up again"))
+    # format user information into dict with sql columns as keys
+    updateValues = {"confirmed": True}
+    filters = {"username": tokenEntry["username"]}
+    # update confirmation status for user in db
+    sqlClient.update_entry(updateValues, filters, os.environ["userTable"])
+    # delete the token after successful reset
+    sqlClient.delete_entry({"token": token}, os.environ["confirmTable"])
+    logger.info(f"Confirmation successful for user: {tokenEntry['username']}")
+    # render success page
+    return render_template("confirm_email_success.html")
 # set route for forgot password page
 @app.route("/forgot_password", methods=["GET", "POST"])
 def forgot_password():
@@ -220,16 +261,16 @@ def forgot_password():
         matchedUser = next((user for user in users if user["email"] == email), None)
         # if the email exists in the userbase
         if matchedUser:
-            # generate a token
+            # generate a reset token
             token = secrets.token_urlsafe(32)
             # and set its expiration date
             expires = (datetime.now() + timedelta(minutes=10)).strftime('%Y-%m-%d %H:%M:%S')
             # format user into dict with sql columns as keys
-            user = {"user": matchedUser["username"]}
+            user = {"username": matchedUser["username"]}
             # remove any existing reset info
             sqlClient.delete_entry(user, os.environ["resetTable"])
             # format reset information into dict with sql columns as keys
-            resetInfo = {"user": matchedUser["username"], "token": token, "expiration": expires}
+            resetInfo = {"username": matchedUser["username"], "token": token, "expiration": expires}
             # add new reset info
             sqlClient.add_entry(resetInfo, os.environ["resetTable"])
             # send an email (implement using ses)
@@ -249,13 +290,11 @@ def reset_password():
     resetTokens = sqlClient.read_table(os.environ["resetTable"])
     # check that the reset token exists
     tokenEntry = next((row for row in resetTokens if row["token"] == token), None)
-    # check for errors
-    error = None
     # error if no token is in the url or it doesn't exist in the table or if the token is expired
     if not token or not tokenEntry or datetime.now() > tokenEntry["expiration"]:
         logger.warning(f"Failed password reset attempt")
         # stay on the signup page and display error
-        return redirect(url_for("login", error="Password reset attempt expired. Try requesting again"))
+        return redirect(url_for("login", error="Password reset has expired. Try requesting again"))
     # if no error,
     if request.method == "POST":
         # allow users to input new password
@@ -281,12 +320,12 @@ def reset_password():
             hashedPassword = bcrypt.hashpw(newPassword.encode(), salt)
             # format reset information into dict with sql columns as keys
             updateValues = {"password": hashedPassword}
-            filters = {"username": tokenEntry["user"]}
+            filters = {"username": tokenEntry["username"]}
             # update password for user in db
             sqlClient.update_entry(updateValues, filters, os.environ["userTable"])
             # delete the token after successful reset
             sqlClient.delete_entry({"token": token}, os.environ["resetTable"])
-            logger.info(f"Password reset successfully for user: {tokenEntry['user']}")
+            logger.info(f"Password reset successfully for user: {tokenEntry['username']}")
             # render success page
             return render_template("reset_password_success.html")
     # render reset password page
