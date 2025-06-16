@@ -36,41 +36,6 @@ class MySQLClient:
         except Exception as e:
             logger.error(f"Error closing MySQL connection: {e}", exc_info=True)
             raise
-    def add_entry(self, username, hashedPassword, email, table):
-        logger.debug(f"Adding entry for username: {username} into table: {table}")
-        # start a new connection
-        conn = self.connect()
-        # try to add a new user
-        try:
-            with conn.cursor() as cursor:
-                sql = f"INSERT INTO {table} (username, password, email) VALUES (%s, %s, %s)"
-                cursor.execute(sql, (username, hashedPassword, email))
-            conn.commit()
-            print(f"User '{username}' added successfully.")
-            logger.debug(f"User '{username}' added successfully.")
-        except Exception as e:
-            logger.error(f"Failed to add user '{username}': {e}", exc_info=True)
-            raise
-        # close the connection
-        finally:
-            self.disconnect(conn)
-    def update_entry(self, username, hashedPassword, table):
-        logger.debug(f"Updating password for username: {username} in table: {table}")
-        # start a new connection
-        conn = self.connect()
-        # try to update a user
-        try:
-            with conn.cursor() as cursor:
-                sql = f"UPDATE {table} SET password = %s WHERE username = %s"
-                cursor.execute(sql, (hashedPassword, username))
-            conn.commit()
-            logger.debug(f"User '{username}' updated successfully.")
-        except Exception as e:
-            logger.error(f"Failed to update user '{username}': {e}", exc_info=True)
-            raise
-        # close the connection
-        finally:
-            self.disconnect(conn)
     def read_table(self, table):
         logger.debug(f"Reading all entries from table: {table}")
         # start a new connection
@@ -85,6 +50,47 @@ class MySQLClient:
         except Exception as e:
             logger.error(f"Failed to read from table '{table}': {e}", exc_info=True)
             return []
+        # close the connection
+        finally:
+            self.disconnect(conn)
+    def add_entry(self, entry, table):
+        logger.debug(f"Adding entry into table: {table}")
+        # start a new connection
+        conn = self.connect()
+        # try to add a new user
+        try:
+            with conn.cursor() as cursor:
+                # get the keys and values for the entry
+                columns = ', '.join(entry.keys())
+                placeholders = ', '.join(['%s']*len(entry))
+                values = tuple(entry.values())
+                sql = f"INSERT INTO {table} ({columns}) VALUES ({placeholders})"
+                cursor.execute(sql, values)
+            conn.commit()
+            logger.debug("Entry added successfully.")
+        except Exception as e:
+            logger.error(f"Failed to add entry': {e}", exc_info=True)
+            raise
+        # close the connection
+        finally:
+            self.disconnect(conn)
+    def update_entry(self, updateValues, filters, table):
+        logger.debug(f"Updating entry in table: {table}")
+        # start a new connection
+        conn = self.connect()
+        # try to update a user
+        try:
+            with conn.cursor() as cursor:
+                setColumns = ", ".join(f"{col} = %s" for col in updateValues.keys())
+                filterColumns = " AND ".join(f"{col} = %s" for col in filters.keys())
+                params = tuple(updateValues.values()) + tuple(filters.values())
+                sql = f"UPDATE {table} SET {setColumns} WHERE {filterColumns}"
+                cursor.execute(sql, params)
+            conn.commit()
+            logger.debug(f"Entry updated successfully.")
+        except Exception as e:
+            logger.error(f"Failed to update entry: {e}", exc_info=True)
+            raise
         # close the connection
         finally:
             self.disconnect(conn)
