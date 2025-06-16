@@ -175,18 +175,18 @@ def signup():
         confirmEmail = request.form["confirmEmail"]
         # check for errors
         error = None
+        # error if one of the fields is not filled out
+        if not newUsername or not newEmail or not newPassword:
+            error = "Please enter a username, email, and password"
         # error if the username is already in use
-        if any(newUsername == user["username"] for user in users):
+        elif any(newUsername == user["username"] for user in users):
             error = "Username already exists"
         # error if the email is already in use
-        if any(newEmail == user["email"] for user in users):
+        elif any(newEmail == user["email"] for user in users):
             error = "Email already in use"
         # error if the email confirmation does not match
         elif newEmail != confirmEmail:
             error = "Emails do not match"
-        # error if one of the fields is not filled out
-        elif not newUsername or not newEmail or not newPassword:
-            error = "Please enter a username, email, and password"
         # if there's an error
         if error:
             logger.warning(f"Failed signup attempt for username: {newUsername}")
@@ -223,8 +223,13 @@ def forgot_password():
             token = secrets.token_urlsafe(32)
             # and set its expiration date
             expires = (datetime.now() + timedelta(minutes=10)).strftime('%Y-%m-%d %H:%M:%S')
+            # format user into dict with sql columns as keys
+            user = {"user": matchedUser["username"]}
+            # remove any existing reset info
+            sqlClient.delete_entry(user, os.environ["resetTable"])
             # format reset information into dict with sql columns as keys
             resetInfo = {"user": matchedUser["username"], "token": token, "expiration": expires}
+            # add new reset info
             sqlClient.add_entry(resetInfo, os.environ["resetTable"])
             # send an email (implement using ses)
             return render_template("forgot_password_sent.html", email=email)

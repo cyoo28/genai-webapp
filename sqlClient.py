@@ -94,7 +94,7 @@ class MySQLClient:
         # close the connection
         finally:
             self.disconnect(conn)
-    def remove_entry(self, filters, table):
+    def delete_entry(self, filters, table):
         logger.debug(f"Removing entry in table: {table}")
         # start a new connection
         conn = self.connect()
@@ -105,6 +105,7 @@ class MySQLClient:
                 params = tuple(filters.values())
                 sql = f"DELETE FROM {table} WHERE {filterColumns}"
                 cursor.execute(sql, params)
+            conn.commit()
             logger.debug(f"Entry removed successfully.")
         except Exception as e:
             logger.error(f"Failed to remove entry: {e}", exc_info=True)
