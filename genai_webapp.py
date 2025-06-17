@@ -17,7 +17,6 @@ from threading import Lock
 from sqlClient import MySQLClient
 from s3Client import MyS3Client
 # define environment variables
-os.environ["awsProfile"] = os.environ.get("AWSPROF", None) # aws profile for boto3 session
 os.environ["awsRegion"] = "us-east-1" # aws region for bot3 session
 os.environ["gcpSecret"] = "gcp-genai-sa" # aws secret that contains gcp service account key
 os.environ["gcpProject"] = "ix-sandbox" # gcp project where vertex ai resources are enabled
@@ -82,7 +81,7 @@ def chat_to_obj(chatHistory):
     return chatObj
 # set up boto3 session
 logger.debug(f"Setting up boto3")
-if os.environ["awsProfile"]:
+if os.environ.get("AWSPROF", None):
     awsSession = boto3.Session(profile_name=os.environ["awsProfile"], region_name=os.environ["awsRegion"])
 else:
     awsSession = boto3.Session(region_name=os.environ["awsRegion"])
