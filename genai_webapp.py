@@ -536,7 +536,7 @@ def handle_exception(e):
     return jsonify({"error": "An internal server error occurred"}), 500
 @app.route("/ping")
 def ping():
-    return 1
+    return "pong"
 
 if __name__ == "__main__":
     logger.info("Starting Flask app on http://127.0.0.1:5000")
