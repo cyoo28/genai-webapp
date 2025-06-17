@@ -262,7 +262,7 @@ def signup():
 
                 {confirmationUrl}
 
-                This link will expire in 24 hours (on {emailExpire}).
+                This link will expire in 24 hours (at {emailExpire}).
 
                 If you did not sign up for this account, please ignore this email.
 
@@ -326,6 +326,29 @@ def forgot_password():
             # add new reset info
             sqlClient.add_entry(resetEntry, os.environ["resetTable"])
             # send an email (implement using ses)
+            with app.app_context():
+                resetUrl = url_for('reset_password', token=token, _external=True)
+            # make datetime more readable
+            emailExpire = expire.strftime("%A, %B %d, %Y at %I:%M %p")
+            # send email through SES
+            sender = os.environ["emailSender"]
+            recipient = [email]
+            subject = "IX Cloud Password Reset Request"
+            body = f"""Hello {matchedUser["username"]},
+
+                Please reset your account password by clicking the link below:
+
+                {resetUrl}
+
+                This link will expire in 10 minutes (at {emailExpire}).
+
+                If you did not request to reset your password, please ignore this email.
+
+                Best regards,  
+                IX Cloud Security Team
+            """
+            send_email(sesClient, sender, recipient, subject, body)
+            # render forgot password success page
             return render_template("forgot_password_success.html", email=email)
         # if it does not,
         else:
