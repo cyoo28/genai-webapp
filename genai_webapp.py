@@ -17,7 +17,7 @@ from threading import Lock
 from sqlClient import MySQLClient
 from s3Client import MyS3Client
 # define environment variables
-os.environ["awsProfile"] = "ix-dev" # aws profile for boto3 session
+os.environ["awsProfile"] = os.environ.get("AWSPROF", None) # aws profile for boto3 session
 os.environ["awsRegion"] = "us-east-1" # aws region for bot3 session
 os.environ["gcpSecret"] = "gcp-genai-sa" # aws secret that contains gcp service account key
 os.environ["gcpProject"] = "ix-sandbox" # gcp project where vertex ai resources are enabled
@@ -31,11 +31,27 @@ os.environ["resetTable"] = "password_reset" # table with password reset tokens i
 os.environ["confirmTable"] = "confirmation" # table with confirmation tokens in MySQL database
 os.environ["appParam"] = "webappKey" # aws parameter for webapp session key
 os.environ["s3Bucket"] = "026090555438-genai-chat" # aws bucket for chat history
+os.environ["emailSender"] = "notify@ixcloudsecurity.com" # sender for ses emails
 # set up logging
 logging.basicConfig(stream=sys.stderr, 
                     level=logging.INFO, 
                     format="%(asctime)-11s [%(levelname)s] %(message)s (%(name)s:%(lineno)d)")
 logger = logging.getLogger(__name__)
+# define function to send email
+def send_email(sesClient, sender, recipients, subject, body):
+    try:
+        logger.info("sending notification to: {}".format(recipients))
+        charset = "UTF-8"
+        res = sesClient.send_email(Destination={ "ToAddresses": recipients },
+                                    Message={ "Body": { "Text": { "Charset": charset, "Data": body } },
+                                              "Subject": { "Charset": charset, "Data": subject } },
+                                    Source=sender)
+        if "MessageId" in res:
+            logger.info("Notification sent successfully: {}".format(res["MessageId"]))
+        else:
+            logger.warning("Notification may not have been sent: {}".format(res))
+    except Exception as e:
+        logger.error("Failed to send email: {}".format(e))
 # define function to convert s3 object to model format
 def chat_from_obj(chatObj):
     logger.debug(f"Converting s3 object to model format")
@@ -49,7 +65,7 @@ def chat_from_obj(chatObj):
             "role": message["role"],
             "parts": parts
         })
-    return chatHistory   
+    return chatHistory
 # define function to convert chat to s3 object
 def chat_to_obj(chatHistory):
     logger.debug(f"Converting model format to s3 object")
@@ -64,10 +80,18 @@ def chat_to_obj(chatHistory):
     # convert json to object for s3
     chatObj = json.dumps(chatJson)
     return chatObj
+# set up boto3 session
+logger.debug(f"Setting up boto3")
+if os.environ["awsProfile"]:
+    awsSession = boto3.Session(profile_name=os.environ["awsProfile"], region_name=os.environ["awsRegion"])
+else:
+    awsSession = boto3.Session(region_name=os.environ["awsRegion"])
+# set up aws clients
+sesClient = awsSession.client("ses")
+smClient = awsSession.client("secretsmanager")
+ssmClient = awsSession.client("ssm")
 # retrieve gcp service account key from aws secrets manager
 logger.debug(f"Getting service account key from AWS Secrets Manager")
-awsSession = boto3.Session(profile_name=os.environ["awsProfile"], region_name=os.environ["awsRegion"])
-smClient = awsSession.client("secretsmanager")
 saResponse = smClient.get_secret_value(SecretId=os.environ["gcpSecret"])
 saInfo = json.loads(saResponse["SecretString"])
 # authenticate with gcloud service account
@@ -108,7 +132,6 @@ logger.debug(f"Setting up s3 client")
 s3Client = MyS3Client(awsSession, os.environ["s3Bucket"])
 # retrieve webapp session key from aws parameter store
 logger.debug(f"Getting webapp key from AWS Secrets Manager")
-ssmClient = awsSession.client("ssm")
 appResponse = ssmClient.get_parameter(Name=os.environ["appParam"], WithDecryption=True)
 # set up flask webapp
 logger.debug(f"Setting up webapp")
@@ -213,16 +236,43 @@ def signup():
             # generate a confirmation token
             token = secrets.token_urlsafe(32)
             # and set its expiration date
-            expires = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d %H:%M:%S')
+            expire = datetime.now() + timedelta(days=1)
+            sqlExpire = expire.strftime('%Y-%m-%d %H:%M:%S')
             # format user into dict with sql columns as keys
-            user = {"username": newUsername, "password": hashedPassword, "email": newEmail, "confirmed": False}
-            confirmInfo = {"username": newUsername, "token": token, "expiration": expires}
+            userEntry = {"username": newUsername, "password": hashedPassword, "email": newEmail, "confirmed": False}
+            confirmEntry = {"username": newUsername, "token": token, "expiration": sqlExpire}
+            confirmDeleteFilter = {"username": newUsername}
+            # remove any existing signup info
+            sqlClient.delete_entry(confirmDeleteFilter, os.environ["confirmTable"])
             # add new user to db
-            sqlClient.add_entry(confirmInfo, os.environ["confirmTable"])
-            sqlClient.add_entry(user, os.environ["userTable"])
+            sqlClient.add_entry(confirmEntry, os.environ["confirmTable"])
+            sqlClient.add_entry(userEntry, os.environ["userTable"])
+            # create confirmation link
+            with app.app_context():
+                confirmationUrl = url_for('confirm_email', token=token, _external=True)
+            # make datetime more readable
+            emailExpire = expire.strftime("%A, %B %d, %Y at %I:%M %p")
+            # send email through SES
+            sender = os.environ["emailSender"]
+            recipient = [newEmail]
+            subject = "IX Cloud Signup Confirmation"
+            body = f"""Hello {newUsername},
+
+                Thank you for signing up! Please confirm your email address by clicking the link below:
+
+                {confirmationUrl}
+
+                This link will expire in 24 hours (on {emailExpire}).
+
+                If you did not sign up for this account, please ignore this email.
+
+                Best regards,  
+                IX Cloud Security Team
+            """
+            send_email(sesClient, sender, recipient, subject, body)
             logger.info(f"User {newUsername} signed up successfully.")
-            # redirect to login page
-            return redirect(url_for("login"))
+            # render signup page success page
+            return render_template("signup_success.html")
     # render signup page
     return render_template("signup.html")
 # set route for email confirmation page
@@ -240,12 +290,13 @@ def confirm_email():
         # stay on the signup page and display error
         return redirect(url_for("login", error="Email confirmation has expired. Try signing up again"))
     # format user information into dict with sql columns as keys
-    updateValues = {"confirmed": True}
-    filters = {"username": tokenEntry["username"]}
+    userUpdateValue = {"confirmed": True}
+    userUpdateFilter = {"username": tokenEntry["username"]}
+    resetDeleteFilter = {"token": token}
     # update confirmation status for user in db
-    sqlClient.update_entry(updateValues, filters, os.environ["userTable"])
+    sqlClient.update_entry(userUpdateValue, userUpdateFilter, os.environ["userTable"])
     # delete the token after successful reset
-    sqlClient.delete_entry({"token": token}, os.environ["confirmTable"])
+    sqlClient.delete_entry(resetDeleteFilter, os.environ["confirmTable"])
     logger.info(f"Confirmation successful for user: {tokenEntry['username']}")
     # render success page
     return render_template("confirm_email_success.html")
@@ -264,15 +315,16 @@ def forgot_password():
             # generate a reset token
             token = secrets.token_urlsafe(32)
             # and set its expiration date
-            expires = (datetime.now() + timedelta(minutes=10)).strftime('%Y-%m-%d %H:%M:%S')
+            expire = datetime.now() + timedelta(minutes=10)
+            sqlExpire = expire.strftime('%Y-%m-%d %H:%M:%S')
             # format user into dict with sql columns as keys
-            user = {"username": matchedUser["username"]}
+            resetDeleteFilter = {"username": matchedUser["username"]}
             # remove any existing reset info
-            sqlClient.delete_entry(user, os.environ["resetTable"])
+            sqlClient.delete_entry(resetDeleteFilter, os.environ["resetTable"])
             # format reset information into dict with sql columns as keys
-            resetInfo = {"username": matchedUser["username"], "token": token, "expiration": expires}
+            resetEntry = {"username": matchedUser["username"], "token": token, "expiration": sqlExpire}
             # add new reset info
-            sqlClient.add_entry(resetInfo, os.environ["resetTable"])
+            sqlClient.add_entry(resetEntry, os.environ["resetTable"])
             # send an email (implement using ses)
             return render_template("forgot_password_success.html", email=email)
         # if it does not,
@@ -319,12 +371,13 @@ def reset_password():
             # encrypt password
             hashedPassword = bcrypt.hashpw(newPassword.encode(), salt)
             # format reset information into dict with sql columns as keys
-            updateValues = {"password": hashedPassword}
-            filters = {"username": tokenEntry["username"]}
+            userUpdateValue = {"password": hashedPassword}
+            userUpdateFilter = {"username": tokenEntry["username"]}
+            resetDeleteFiler = {"token": token}
             # update password for user in db
-            sqlClient.update_entry(updateValues, filters, os.environ["userTable"])
+            sqlClient.update_entry(userUpdateValue, userUpdateFilter, os.environ["userTable"])
             # delete the token after successful reset
-            sqlClient.delete_entry({"token": token}, os.environ["resetTable"])
+            sqlClient.delete_entry(resetDeleteFiler, os.environ["resetTable"])
             logger.info(f"Password reset successfully for user: {tokenEntry['username']}")
             # render success page
             return render_template("reset_password_success.html")
@@ -364,10 +417,10 @@ def change_password():
             # encrypt password
             hashedPassword = bcrypt.hashpw(newPassword.encode(), salt)
             # format change information into dict with sql columns as keys
-            updateValues  = {"password": hashedPassword}
-            filters = {"username": username}
+            userUpdateValue  = {"password": hashedPassword}
+            userUpdateFilter = {"username": username}
             # update password for user in db
-            sqlClient.update_entry(updateValues, filters, os.environ["userTable"])
+            sqlClient.update_entry(userUpdateValue, userUpdateFilter, os.environ["userTable"])
             logger.info(f"User {username} changed password successfully.")
             # redirect to login page
             return redirect(url_for("select_chat"))
