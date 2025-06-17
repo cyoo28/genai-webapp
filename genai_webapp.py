@@ -534,6 +534,9 @@ def send_message():
 def handle_exception(e):
     logger.error("Unhandled exception occurred", exc_info=True)
     return jsonify({"error": "An internal server error occurred"}), 500
+@app.route("/ping")
+def ping():
+    return 1
 
 if __name__ == "__main__":
     logger.info("Starting Flask app on http://127.0.0.1:5000")
