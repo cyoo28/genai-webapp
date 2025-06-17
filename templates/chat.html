@@ -4,10 +4,22 @@
   <meta charset="UTF-8">
   <title>Gemini-Based Chat Assistant</title>
   <link rel="icon" href="{{ url_for('static', filename='chatbot.png') }}" type="image/jpeg">
-  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.tailwindcss.com?plugins=typography"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <style>
+    .prose table {
+      border-collapse: collapse;
+      border: 1px solid #D1D5DB;
+    }
+    .prose th,
+    .prose td {
+      border: 1px solid #D1D5DB;
+      padding: 0.75rem 0.75rem;
+    }
+  </style>
 </head>
 <body class="bg-gray-100 h-screen flex items-center justify-center">
-  <div class="w-full max-w-2xl h-[90vh] flex flex-col bg-white rounded-xl shadow-lg overflow-hidden">
+  <div class="w-full max-w-screen-xl mx-4 h-[95vh] flex flex-col bg-white rounded-xl shadow-lg overflow-hidden">
     <div class="p-4 bg-blue-600 text-white text-xl font-semibold flex justify-between items-center">
       <span>Gemini-Based Assistant</span>
       <div class="text-sm flex items-center space-x-2">
@@ -66,11 +78,14 @@
         appendMessage("Error", data.error, "bg-red-100", "text-left");
       }
     }
-
     function appendMessage(sender, text, bgColor, alignment) {
       const message = document.createElement("div");
-      message.className = `p-3 rounded-lg shadow ${bgColor} ${alignment} max-w-[80%]`;
-      message.innerHTML = `<strong>${sender}:</strong><br>${text}`;
+      message.className = `p-3 rounded-lg shadow ${bgColor} ${alignment} max-w-[80%] prose overflow-x-auto break-words`;
+
+      // Convert markdown text to HTML using marked.js
+      const htmlText = marked.parse(text);
+
+      message.innerHTML = `<strong>${sender}:</strong><br>${htmlText}`;
       
       const wrapper = document.createElement("div");
       wrapper.className = `w-full flex ${alignment === 'text-right' ? 'justify-end' : 'justify-start'}`;

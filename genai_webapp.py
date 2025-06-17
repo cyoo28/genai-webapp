@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 # define function to send email
 def send_email(sesClient, sender, recipients, subject, body):
     try:
-        logger.info("sending notification to: {}".format(recipients))
+        logger.debug(f"Sending notification to: {recipients}")
         charset = "UTF-8"
         res = sesClient.send_email(Destination={ "ToAddresses": recipients },
                                     Message={ "Body": { "Text": { "Charset": charset, "Data": body } },
@@ -50,7 +50,7 @@ def send_email(sesClient, sender, recipients, subject, body):
         else:
             logger.warning("Notification may not have been sent: {}".format(res))
     except Exception as e:
-        logger.error("Failed to send email: {}".format(e))
+        logger.error(f"Error sending email to {recipients}: {e}")
 # define function to convert s3 object to model format
 def chat_from_obj(chatObj):
     logger.debug(f"Converting s3 object to model format")
@@ -81,8 +81,9 @@ def chat_to_obj(chatHistory):
     return chatObj
 # set up boto3 session
 logger.debug(f"Setting up boto3")
-if os.environ.get("AWSPROF", None):
-    awsSession = boto3.Session(profile_name=os.environ["awsProfile"], region_name=os.environ["awsRegion"])
+awsProfile = os.environ.get("AWSPROF", None)
+if awsProfile:
+    awsSession = boto3.Session(profile_name=awsProfile, region_name=os.environ["awsRegion"])
 else:
     awsSession = boto3.Session(region_name=os.environ["awsRegion"])
 # set up aws clients
@@ -169,7 +170,7 @@ def login():
         # if there is an error,
         if error:
             # stay on the login page and display error
-            logger.warning(f"Failed login attempt for username: {username}")
+            logger.warning(f"Failed login attempt for user: {username}")
             return render_template("login.html", error=error)
         # otherwise, it is a successful login
         else:
@@ -178,7 +179,7 @@ def login():
             # session expires if browser is closed
             session.permanent = False
             # redirect to the chat
-            logger.info(f"User {username} logged in successfully.")
+            logger.info(f"User {username} logged in.")
             return redirect(url_for("select_chat"))
     # render the login page
     error = request.args.get("error")
@@ -223,7 +224,7 @@ def signup():
             error = "Emails do not match"
         # if there's an error
         if error:
-            logger.warning(f"Failed signup attempt for username: {newUsername}")
+            logger.warning(f"Failed signup attempt for user: {newUsername}")
             # stay on the signup page and display error
             return render_template("signup.html", error=error)
         # if no error,
@@ -269,7 +270,7 @@ def signup():
                 IX Cloud Security Team
             """
             send_email(sesClient, sender, recipient, subject, body)
-            logger.info(f"User {newUsername} signed up successfully.")
+            logger.info(f"User {newUsername} signed up.")
             # render signup page success page
             return render_template("signup_success.html")
     # render signup page
@@ -285,7 +286,7 @@ def confirm_email():
     tokenEntry = next((row for row in confirmTokens if row["token"] == token), None)
     # error if no token is in the url or it doesn't exist in the table or if the token is expired
     if not token or not tokenEntry or datetime.now() > tokenEntry["expiration"]:
-        logger.warning(f"Failed email confirmation attempt")
+        logger.warning(f"Failed email confirmation attempt for user: {tokenEntry['username']}")
         # stay on the signup page and display error
         return redirect(url_for("login", error="Email confirmation has expired. Try signing up again"))
     # format user information into dict with sql columns as keys
@@ -296,7 +297,7 @@ def confirm_email():
     sqlClient.update_entry(userUpdateValue, userUpdateFilter, os.environ["userTable"])
     # delete the token after successful reset
     sqlClient.delete_entry(resetDeleteFilter, os.environ["confirmTable"])
-    logger.info(f"Confirmation successful for user: {tokenEntry['username']}")
+    logger.info(f"User {tokenEntry['username']} confirmed email")
     # render success page
     return render_template("confirm_email_success.html")
 # set route for forgot password page
@@ -348,10 +349,12 @@ def forgot_password():
             """
             send_email(sesClient, sender, recipient, subject, body)
             # render forgot password success page
+            logger.info(f"User {matchedUser['username']} requested password reset.")
             return render_template("forgot_password_success.html", email=email)
         # if it does not,
         else:
             # stay on forgot password page and display error
+            logger.warning(f"Failed password reset request for user: {matchedUser['username']}")
             return render_template("forgot_password.html", error="Email not found")
     # render forgot password page
     return render_template("forgot_password.html")
@@ -366,7 +369,7 @@ def reset_password():
     tokenEntry = next((row for row in resetTokens if row["token"] == token), None)
     # error if no token is in the url or it doesn't exist in the table or if the token is expired
     if not token or not tokenEntry or datetime.now() > tokenEntry["expiration"]:
-        logger.warning(f"Failed password reset attempt")
+        logger.warning(f"Failed password reset attempt for user: {tokenEntry['username']}")
         # stay on the signup page and display error
         return redirect(url_for("login", error="Password reset has expired. Try requesting again"))
     # if no error,
@@ -400,7 +403,7 @@ def reset_password():
             sqlClient.update_entry(userUpdateValue, userUpdateFilter, os.environ["userTable"])
             # delete the token after successful reset
             sqlClient.delete_entry(resetDeleteFiler, os.environ["resetTable"])
-            logger.info(f"Password reset successfully for user: {tokenEntry['username']}")
+            logger.info(f"User {tokenEntry['username']} reset password.")
             # render success page
             return render_template("reset_password_success.html")
     # render reset password page
@@ -431,7 +434,7 @@ def change_password():
         if newPassword != confirmPassword:
             error = "change_password.html"
         if error:
-            logger.warning(f"Failed password change attempt for username: {username}")
+            logger.warning(f"Failed password change attempt for user: {username}")
             return render_template('change_password.html', error=error)
         else:
             # generate salt to encrypt password
@@ -443,7 +446,7 @@ def change_password():
             userUpdateFilter = {"username": username}
             # update password for user in db
             sqlClient.update_entry(userUpdateValue, userUpdateFilter, os.environ["userTable"])
-            logger.info(f"User {username} changed password successfully.")
+            logger.info(f"User {username} changed password.")
             # redirect to login page
             return redirect(url_for("select_chat"))
     return render_template("change_password.html")
@@ -507,7 +510,7 @@ def send_message():
     data = request.get_json()
     # extract message
     userInput = data.get("message", "")
-    logger.info(f"User {username} sent message: {userInput}")
+    logger.debug(f"User {username} sent message: {userInput}")
     # check that the message is not empty
     if not userInput:
         # if it is, then return error
@@ -515,7 +518,7 @@ def send_message():
     try:
         # if there is a message, try to send the message to chatbot
         response = chatbot.send_message(userInput)
-        logger.info(f"Model response for {username}: {response.text}")
+        logger.debug(f"Model response for {username}: {response.text}")
         # write updated chat history to s3
         chatKey = f"chat-history/{username}.json"
         chatHistory = chatbot.get_history()
