@@ -432,7 +432,7 @@ def change_password():
             error = "Incorrect current password."
         # error if the email confirmation does not match
         if newPassword != confirmPassword:
-            error = "change_password.html"
+            error = "Passwords do not match"
         if error:
             logger.warning(f"Failed password change attempt for user: {username}")
             return render_template('change_password.html', error=error)
@@ -473,13 +473,19 @@ def start_chat():
     s3Key = f"chat-history/{username}.json"
     # set the chat history appropriately
     with chatbotsLock:
-        if choice=="continue" and s3Client.obj_lookup(s3Key) is not None:
-            logger.info(f"User {username} is continuing an old chat.")
-            chatObj = s3Client.obj_read(s3Key)
-            history = chat_from_obj(chatObj)
+        history = []
+        if choice=="continue":
+            try:
+                if s3Client.obj_lookup(s3Key):
+                    logger.info(f"User {username} is continuing an old chat.")
+                    chatObj = s3Client.obj_read(s3Key)
+                    history = chat_from_obj(chatObj)
+                else:
+                    logger.info(f"No previous chat found for {username}. Starting fresh.")
+            except:
+                logger.warning(f"Failed to load chat history for {username}: {e}")
         else:
             logger.info(f"User {username} has started a new chat.")
-            history = []
         # create a chatbot        
         userChatbots[username] = genaiClient.chats.create(
             model=os.environ["geminiModel"],
