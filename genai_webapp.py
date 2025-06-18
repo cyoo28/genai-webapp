@@ -138,6 +138,7 @@ appResponse = ssmClient.get_parameter(Name=os.environ["appParam"], WithDecryptio
 # set up flask webapp
 logger.debug(f"Setting up webapp")
 app = Flask(__name__)
+app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(minutes=1)
 appKey = appResponse["Parameter"]["Value"]
 app.secret_key = appKey
 # set route for landing page
@@ -153,6 +154,7 @@ def index():
 # set route for login page
 @app.route("/login", methods=["GET", "POST"])
 def login():
+    errorMessage = None
     # get users from rds
     users = sqlClient.read_table(os.environ["userTable"])
     # allow users to input username and password
@@ -161,40 +163,46 @@ def login():
         password = request.form["password"]
         # check that the username/password is a valid login
         user = next((u for u in users if u["username"] == username), None)
-        # check for errors
-        error = None
         # error if username or password is incorrect
         if not (user and bcrypt.checkpw(password.encode(), user["password"].encode())):
-            error = "Invalid username or password"
+            errorMessage = "Invalid username or password"
         # error if user email has not been confirmed
         elif not user["confirmed"]:
-            error = "User email has not been confirmed"
+            errorMessage = "User email has not been confirmed"
         # if there is an error,
-        if error:
+        if errorMessage:
             # stay on the login page and display error
             logger.warning(f"Failed login attempt for user: {username}")
-            return render_template("login.html", error=error)
+            return render_template("login.html", error=errorMessage)
         # otherwise, it is a successful login
         else:
             # set session
             session["username"] = username
             # session expires if browser is closed
-            session.permanent = False
+            session.permanent = True
             # redirect to the chat
             logger.info(f"User {username} logged in.")
             return redirect(url_for("select_chat"))
     # render the login page
     error = request.args.get("error")
-    return render_template("login.html", error=error)
+    if error == "session_expired":
+        errorMessage = "Your session has expired due to inactivity. Please log in again."
+    elif error == "confirm_expired":
+        errorMessage = "Email confirmation has expired. Try signing up again."
+    elif error == "reset_expired":
+        errorMessage = "Password reset has expired. Try requesting again."
+    return render_template("login.html", error=errorMessage)
 # set route for logout page
 @app.route("/logout")
 def logout():
     username = session.get("username")
-    logger.info(f"User {username} logged out.")
-    # delete chatbot
     if username:
+        logger.info(f"User {username} logged out.")
+        # delete chatbot
         with chatbotsLock:
             userChatbots.pop(username, None)
+    else:
+        logger.info("User logged out but no username was in session.")
     # clear session
     session.clear()
     # render the logout page (which redirects to the login)
@@ -211,24 +219,24 @@ def signup():
         newEmail = request.form["email"]
         confirmEmail = request.form["confirmEmail"]
         # check for errors
-        error = None
+        errorMessage = None
         # error if one of the fields is not filled out
         if not newUsername or not newEmail or not newPassword:
-            error = "Please enter a username, email, and password"
+            errorMessage = "Please enter a username, email, and password"
         # error if the username is already in use
         elif any(newUsername == user["username"] for user in users):
-            error = "Username already exists"
+            errorMessage = "Username already exists"
         # error if the email is already in use
         elif any(newEmail == user["email"] for user in users):
-            error = "Email already in use"
+            errorMessage = "Email already in use"
         # error if the email confirmation does not match
         elif newEmail != confirmEmail:
-            error = "Emails do not match"
+            errorMessage = "Emails do not match"
         # if there's an error
-        if error:
+        if errorMessage:
             logger.warning(f"Failed signup attempt for user: {newUsername}")
             # stay on the signup page and display error
-            return render_template("signup.html", error=error)
+            return render_template("signup.html", error=errorMessage)
         # if no error,
         else:
             # generate salt to encrypt password
@@ -289,8 +297,8 @@ def confirm_email():
     # error if no token is in the url or it doesn't exist in the table or if the token is expired
     if not token or not tokenEntry or datetime.now() > tokenEntry["expiration"]:
         logger.warning(f"Failed email confirmation attempt for user: {tokenEntry['username']}")
-        # stay on the signup page and display error
-        return redirect(url_for("login", error="Email confirmation has expired. Try signing up again"))
+        # redirect to login page and display error
+        return redirect(url_for("login", error="confirm_expired"))
     # format user information into dict with sql columns as keys
     userUpdateValue = {"confirmed": True}
     userUpdateFilter = {"username": tokenEntry["username"]}
@@ -372,25 +380,25 @@ def reset_password():
     # error if no token is in the url or it doesn't exist in the table or if the token is expired
     if not token or not tokenEntry or datetime.now() > tokenEntry["expiration"]:
         logger.warning(f"Failed password reset attempt for user: {tokenEntry['username']}")
-        # stay on the signup page and display error
-        return redirect(url_for("login", error="Password reset has expired. Try requesting again"))
+        # redirect to login page and display error
+        return redirect(url_for("login", error="reset_expired"))
     # if no error,
     if request.method == "POST":
         # allow users to input new password
         newPassword = request.form["password"]
         confirmPassword = request.form["confirmPassword"]
         # check for errors
-        error = None
+        errorMessage = None
         # error if one of the fields is not filled out
         if not newPassword or not confirmPassword:
-            error = "Please enter email and confirmation"
+            errorMessage = "Please enter email and confirmation"
         # error if the email confirmation does not match
         elif newPassword != confirmPassword:
-            error = "Passwords do not match"
+            errorMessage = "Passwords do not match"
         # if there's an error
-        if error:
+        if errorMessage:
             # stay on the signup page and display error
-            return redirect(url_for("login", error=error))
+            return render_template("reset_password.html", error=errorMessage)
         # if no error
         else:
             # generate salt to encrypt password
@@ -416,7 +424,7 @@ def change_password():
     # check that the user is logged in
     if "username" not in session:
         # if not, redirect back to login page
-        return redirect(url_for("login"))
+        return redirect(url_for("login", error="session_expired"))
     # get users from rds
     users = sqlClient.read_table(os.environ["userTable"])
     # get username when redirected to page
@@ -428,16 +436,16 @@ def change_password():
         newPassword = request.form["newPassword"]
         confirmPassword = request.form["confirmPassword"]
         # check for errors
-        error = None
+        errorMessage = None
         # error if the current password is incorrect
         if not bcrypt.checkpw(oldPassword.encode(), user["password"].encode()):
-            error = "Incorrect current password."
+            errorMessage = "Incorrect current password."
         # error if the email confirmation does not match
         if newPassword != confirmPassword:
-            error = "Passwords do not match"
-        if error:
+            errorMessage = "Passwords do not match"
+        if errorMessage:
             logger.warning(f"Failed password change attempt for user: {username}")
-            return render_template('change_password.html', error=error)
+            return render_template('change_password.html', error=errorMessage)
         else:
             # generate salt to encrypt password
             salt = bcrypt.gensalt()
@@ -458,7 +466,7 @@ def select_chat():
     # check that the user is logged in
     if "username" not in session:
         # if not, redirect back to login page
-        return redirect(url_for("login"))
+        return redirect(url_for("login", error="session_expired"))
     # render select chat page
     return render_template("select_chat.html")
 # set backend for selecting chat
@@ -468,7 +476,7 @@ def start_chat():
     username = session.get("username")
     # if not logged in, redirect back to login page
     if not username:
-        return redirect(url_for("login"))
+        return redirect(url_for("login", error="session_expired"))
     # retrieve user's choice
     choice = request.form.get("chat_choice")  # "continue" or "new"
     # set the s3 key using the user's username
@@ -500,7 +508,7 @@ def start_chat():
 def chat():
     # check that user is logged in
     if "username" not in session:
-        return redirect(url_for("login"))
+        return redirect(url_for("login", error="session_expired"))
     # get username when redirected to page
     username = session["username"]
     # render chat page
