@@ -11,6 +11,7 @@ import bcrypt
 import secrets
 from datetime import datetime, timedelta
 import sys
+from time import time
 import logging
 from threading import Lock
 # import custom files
@@ -121,6 +122,7 @@ config = GenerateContentConfig(
 # In-memory store for chatbots keyed by username
 userChatbots = {}
 chatbotsLock = Lock()
+lastMessageTime = {}
 # create MySQLClient instance in aws
 logger.debug(f"Getting database credentials from AWS Secrets Manager")
 dbResponse = smClient.get_secret_value(SecretId=os.environ["dbSecret"])
@@ -515,12 +517,23 @@ def send_message():
     # extract json for incoming request
     data = request.get_json()
     # extract message
-    userInput = data.get("message", "")
+    userInput = data.get("message", "").strip()
     logger.debug(f"User {username} sent message: {userInput}")
-    # check that the message is not empty
+    # Reject empty messages
     if not userInput:
-        # if it is, then return error
         return jsonify({"error": "Empty message"}), 400
+    # Enforce max message length
+    maxLength = 2000
+    if len(userInput) > maxLength:
+        return jsonify({"error": f"Message too long. Limit is {maxLength} characters."}), 400
+    # Enforce rate limit in seconds (e.g., 1 message every 2 seconds)
+    rateLimit = 2
+    now = time()
+    lastTime = lastMessageTime.get(username, 0)
+    if now - lastTime < rateLimit:
+        return jsonify({"error": f"You're sending messages too fast. Please wait a moment."}), 429
+    # Update last message time
+    lastMessageTime[username] = now
     try:
         # if there is a message, try to send the message to chatbot
         response = chatbot.send_message(userInput)
