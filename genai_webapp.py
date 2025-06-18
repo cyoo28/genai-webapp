@@ -106,7 +106,6 @@ else:
 # set up aws clients
 sesClient = awsSession.client("ses")
 smClient = awsSession.client("secretsmanager")
-ssmClient = awsSession.client("ssm")
 # retrieve gcp service account key from aws secrets manager
 logger.debug(f"Getting service account key from AWS Secrets Manager")
 saResponse = smClient.get_secret_value(SecretId=os.environ["gcpSecret"])
@@ -149,15 +148,11 @@ sqlClient = MySQLClient(os.environ["dbHost"], dbInfo["username"], dbInfo["passwo
 # create MyS3ChatHistory instance
 logger.debug(f"Setting up s3 client")
 s3Client = MyS3Client(awsSession, os.environ["s3Bucket"])
-# retrieve webapp session key from aws parameter store
-logger.debug(f"Getting webapp key from AWS Secrets Manager")
-appResponse = ssmClient.get_parameter(Name=os.environ["appParam"], WithDecryption=True)
 # set up flask webapp
 logger.debug(f"Setting up webapp")
 app = Flask(__name__)
 app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(minutes=30) # time out session after 30 minutes
-appKey = appResponse["Parameter"]["Value"]
-app.secret_key = appKey
+app.secret_key = os.urandom(32)
 # set route for landing page
 @app.route("/")
 def index():
