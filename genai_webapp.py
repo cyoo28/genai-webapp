@@ -11,9 +11,9 @@ import bcrypt
 import secrets
 from datetime import datetime, timedelta
 import sys
-from time import time
+from time import time, sleep
 import logging
-from threading import Lock
+from threading import Thread, Lock
 # import custom files
 from sqlClient import MySQLClient
 from s3Client import MyS3Client
@@ -80,6 +80,22 @@ def chat_to_obj(chatHistory):
     # convert json to object for s3
     chatObj = json.dumps(chatJson)
     return chatObj
+# define function to cleanup idle chatbots
+def chatbot_cleanup():
+    while True:
+        with chatbotsLock:
+            now = time()
+            timeout = app.permanent_session_lifetime.total_seconds()
+            inactive_users = [
+                username for username, last_used in chatbotLastUsed.items()
+                if now - last_used > timeout
+            ]
+            for username in inactive_users:
+                userChatbots.pop(username, None)
+                chatbotLastUsed.pop(username, None)
+                lastMessageTime.pop(username, None)
+                logger.info(f"Removed inactive chatbot for user: {username}")
+        sleep(1200)  # Run every 20 min
 # set up boto3 session
 logger.debug(f"Setting up boto3")
 awsProfile = os.environ.get("AWSPROF", None)
@@ -123,6 +139,7 @@ config = GenerateContentConfig(
 userChatbots = {}
 chatbotsLock = Lock()
 lastMessageTime = {}
+chatbotLastUsed = {}
 # create MySQLClient instance in aws
 logger.debug(f"Getting database credentials from AWS Secrets Manager")
 dbResponse = smClient.get_secret_value(SecretId=os.environ["dbSecret"])
@@ -138,7 +155,7 @@ appResponse = ssmClient.get_parameter(Name=os.environ["appParam"], WithDecryptio
 # set up flask webapp
 logger.debug(f"Setting up webapp")
 app = Flask(__name__)
-app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(minutes=1)
+app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(minutes=30) # time out session after 30 minutes
 appKey = appResponse["Parameter"]["Value"]
 app.secret_key = appKey
 # set route for landing page
@@ -201,6 +218,8 @@ def logout():
         # delete chatbot
         with chatbotsLock:
             userChatbots.pop(username, None)
+            chatbotLastUsed.pop(username, None)
+            lastMessageTime.pop(username, None)
     else:
         logger.info("User logged out but no username was in session.")
     # clear session
@@ -502,6 +521,9 @@ def start_chat():
             history=history,
             config=config
         )
+    # Set last message time
+    lastMessageTime[username] = time()
+    chatbotLastUsed[username] = time()
     return redirect(url_for("chat"))
 # set route for chat
 @app.route("/chat")
@@ -519,7 +541,7 @@ def send_message():
     # check for user's chatbot
     username = session.get("username")
     if not username or username not in userChatbots:
-        return jsonify({"error": "No active chat session"}), 403
+        return jsonify({"error": "Chat session has expired."}), 403
     # load chatbot
     chatbot = userChatbots[username]
     # extract json for incoming request
@@ -537,11 +559,12 @@ def send_message():
     # Enforce rate limit in seconds (e.g., 1 message every 2 seconds)
     rateLimit = 2
     now = time()
-    lastTime = lastMessageTime.get(username, 0)
+    lastTime = lastMessageTime.get(username)
     if now - lastTime < rateLimit:
         return jsonify({"error": f"You're sending messages too fast. Please wait a moment."}), 429
-    # Update last message time
+    # update last message time
     lastMessageTime[username] = now
+    chatbotLastUsed[username] = now
     try:
         # if there is a message, try to send the message to chatbot
         response = chatbot.send_message(userInput)
@@ -568,5 +591,8 @@ def ping():
     return "pong"
 
 if __name__ == "__main__":
+    # Start background thread for cleaning up inactive chatbots
+    Thread(target=chatbot_cleanup, daemon=True).start()
+    # Start webapp
     logger.info("Starting Flask app on http://127.0.0.1:5000")
     app.run()
