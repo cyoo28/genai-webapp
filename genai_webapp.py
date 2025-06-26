@@ -3,9 +3,6 @@
 import os
 import json
 import boto3
-from google import genai
-from google.genai.types import GenerateContentConfig
-from google.oauth2 import service_account
 from flask import Flask, render_template, request, redirect, url_for, jsonify, session
 import bcrypt
 import secrets
@@ -14,24 +11,17 @@ import sys
 from time import time, sleep
 import logging
 from threading import Thread, Lock
+from google import genai
+from google.genai.types import (
+    GenerateContentConfig,
+    Tool,
+    Retrieval,
+    VertexRagStore,
+)
+from google.oauth2 import service_account
 # import custom files
 from sqlClient import MySQLClient
 from s3Client import MyS3Client
-# define environment variables
-os.environ["awsRegion"] = "us-east-1" # aws region for bot3 session
-os.environ["gcpSecret"] = "gcp-genai-sa" # aws secret that contains gcp service account key
-os.environ["gcpProject"] = "ix-sandbox" # gcp project where vertex ai resources are enabled
-os.environ["gcpRegion"] = "us-east4" # gcp region where vertex ai resources are enabled
-os.environ["geminiModel"] = "gemini-2.0-flash-001" # gemini model used for chatbot
-os.environ["dbSecret"] = "mysql-db" # aws secret for MySQL db
-os.environ["dbHost"] = os.environ.get("DBHOST", "genai-db.c16o2ig6ufoe.us-east-1.rds.amazonaws.com") # name of db host
-os.environ["dbName"] = "genai" # name of MySQL database
-os.environ["userTable"] = "users" # table with user info in MySQL database
-os.environ["resetTable"] = "password_reset" # table with password reset tokens in MySQL database
-os.environ["confirmTable"] = "confirmation" # table with confirmation tokens in MySQL database
-os.environ["appParam"] = "webappKey" # aws parameter for webapp session key
-os.environ["s3Bucket"] = "026090555438-genai-chat" # aws bucket for chat history
-os.environ["emailSender"] = "notify@ixcloudsecurity.com" # sender for ses emails
 # set up logging
 logging.basicConfig(stream=sys.stderr, 
                     level=logging.INFO, 
@@ -100,15 +90,33 @@ def chatbot_cleanup():
 logger.debug(f"Setting up boto3")
 awsProfile = os.environ.get("AWSPROF", None)
 if awsProfile:
-    awsSession = boto3.Session(profile_name=awsProfile, region_name=os.environ["awsRegion"])
+    awsSession = boto3.Session(profile_name=awsProfile, region_name="us-east-1")
 else:
-    awsSession = boto3.Session(region_name=os.environ["awsRegion"])
+    awsSession = boto3.Session(region_name="us-east-1")
 # set up aws clients
 sesClient = awsSession.client("ses")
 smClient = awsSession.client("secretsmanager")
+ssmClient = awsSession.client("ssm")
+# get variables from parameter store
+# define environment variables
+gcpSecret = ssmClient.get_parameter(Name="/genai/gcpSecret", WithDecryption=True)["Parameter"]["Value"] # aws secret that contains gcp service account key
+gcpProject = ssmClient.get_parameter(Name="/genai/gcpProject", WithDecryption=True)["Parameter"]["Value"] # gcp project where vertex ai resources are enabled
+gcpRegion = ssmClient.get_parameter(Name="/genai/gcpRegion", WithDecryption=True)["Parameter"]["Value"] # gcp region where vertex ai resources are enabled
+geminiModel = ssmClient.get_parameter(Name="/genai/geminiModel", WithDecryption=True)["Parameter"]["Value"] # gemini model used for chatbot
+dbSecret = ssmClient.get_parameter(Name="/genai/dbSecret", WithDecryption=True)["Parameter"]["Value"] # aws secret for MySQL db
+dbHost = os.environ.get("DBHOST", ssmClient.get_parameter(Name="/genai/dbHost", WithDecryption=True)["Parameter"]["Value"]) # name of db host
+dbName = ssmClient.get_parameter(Name="/genai/dbName", WithDecryption=True)["Parameter"]["Value"] # name of MySQL database
+userTable = ssmClient.get_parameter(Name="/genai/userTable", WithDecryption=True)["Parameter"]["Value"] # table with user info in MySQL database
+resetTable = ssmClient.get_parameter(Name="/genai/resetTable", WithDecryption=True)["Parameter"]["Value"] # table with password reset tokens in MySQL database
+confirmTable = ssmClient.get_parameter(Name="/genai/confirmTable", WithDecryption=True)["Parameter"]["Value"] # table with confirmation tokens in MySQL database
+appParam = ssmClient.get_parameter(Name="/genai/appParam", WithDecryption=True)["Parameter"]["Value"] # aws parameter for webapp session key
+s3Bucket = ssmClient.get_parameter(Name="/genai/s3Bucket", WithDecryption=True)["Parameter"]["Value"] # aws bucket for chat history
+emailSender = ssmClient.get_parameter(Name="/genai/emailSender", WithDecryption=True)["Parameter"]["Value"] # sender for ses emails
+corpusId = ssmClient.get_parameter(Name="/genai/corpusId/test", WithDecryption=True)["Parameter"]["Value"] # test corpus id for RAG
+#corpusId =  ssmClient.get_parameter(Name="/genai/corpusId/prod", WithDecryption=True)["Parameter"]["Value"] # prod corpus id for RAG
 # retrieve gcp service account key from aws secrets manager
 logger.debug(f"Getting service account key from AWS Secrets Manager")
-saResponse = smClient.get_secret_value(SecretId=os.environ["gcpSecret"])
+saResponse = smClient.get_secret_value(SecretId=gcpSecret)
 saInfo = json.loads(saResponse["SecretString"])
 # authenticate with gcloud service account
 logger.debug(f"Authenticating GCP service account")
@@ -118,21 +126,50 @@ credentials = service_account.Credentials.from_service_account_info(
     )
 # set up genai client
 logger.debug(f"Setting up genai client")
-genaiClient = genai.Client(vertexai=True, project=os.environ["gcpProject"], location=os.environ["gcpRegion"], credentials=credentials)
-# model instructions
-systemInstruction = """
-  #You are a basic conversational assistant.
-"""
-# model configuration
-config = GenerateContentConfig(
-       system_instruction=systemInstruction,
+genaiClient = genai.Client(vertexai=True, project=gcpProject, location=gcpRegion, credentials=credentials)
+# set up chatbot instructions
+chatbotInstruction = """
+    You are a warm, empathetic, conversational assistant who listens attentively and encourages the user to share about their day and experiences.
+
+    As you chat, naturally guide the conversation to capture key details such as:
+    - Where the user was
+    - What the user did
+    - Who they spent time with
+    - How they felt about the experience
+
+    Do this in a gentle, casual manner. Avoid direct, pointed questions or sounding like an interviewer. Instead, reflect on what the user says and respond in ways that invite them to share more about these important aspects.
+
+    You also have access to a memory database of the user's past experiences.
+    Use it to recall and reference memories when they are meaningfully related to what the user is saying. For example:
+    - If the user mentions a person, place, or activity they’ve mentioned before
+    - If today’s experience is similar to a past event
+    - If events seem connected (e.g. same day, recurring themes, patterns)
+
+    Bring up these past memories in a natural, thoughtful way — as if you remember them. This helps the user reflect, feel understood, and recognize connections in their own story.
+
+    Use memory context sparingly and seamlessly. Never break the conversational tone or sound like you're querying data. Your goal is to help the user express themselves freely while building a rich, meaningful memory profile over time.
+
+    Keep your tone friendly, supportive, and open-ended.
+    """
+# set up rag
+corpus = VertexRagStore(
+    rag_corpora=[corpusId],
+    similarity_top_k=10,
+    vector_distance_threshold=0.5,
+)
+ragTool = Tool(
+    retrieval=Retrieval(vertex_rag_store=corpus)
+)
+# set up configuration for chatbot model
+chatbotConfig = GenerateContentConfig(
+       system_instruction=chatbotInstruction,
        temperature=0.4, # [float, 0.0, 1.0] control randomness/creativity of response (0.0 is more deterministic, 1.0 is more liberal)
         top_p=0.95, # [float, 0.0, 1.0] consider min set of most probable tokens that exceed cumulative probability, p, and then randomly pick from the next token from this smaller set
-        top_k=20, # [int, 1, 1000] consider the k most probable next tokens and then randomly pick from the next token from this smaller set
-        candidate_count=1, # [int, 1, 8] control how many candidate responses the model should generate that the user can choose from
-        max_output_tokens=1000, # [int, 1, inf] limit maximum tokens contained in response
-        presence_penalty=0.0, # [float, -2.0, 2.0] negative values discourage use of new tokens while positive values encourage use of new tokens
-        frequency_penalty=0.0, # [float, -2.0, 2.0] negative values encourage repetition of tokens while positive values discourage repetition of tokens
+        top_k=40, # [int, 1, 1000] consider the k most probable next tokens and then randomly pick from the next token from this smaller set
+        max_output_tokens=800, # [int, 1, inf] limit maximum tokens contained in response
+        presence_penalty=0.4, # [float, -2.0, 2.0] negative values discourage use of new tokens while positive values encourage use of new tokens
+        frequency_penalty=0.2, # [float, -2.0, 2.0] negative values encourage repetition of tokens while positive values discourage repetition of tokens
+        tools=[ragTool]
        )
 # In-memory store for chatbots keyed by username
 userChatbots = {}
@@ -141,13 +178,13 @@ lastMessageTime = {}
 chatbotLastUsed = {}
 # create MySQLClient instance in aws
 logger.debug(f"Getting database credentials from AWS Secrets Manager")
-dbResponse = smClient.get_secret_value(SecretId=os.environ["dbSecret"])
+dbResponse = smClient.get_secret_value(SecretId=dbSecret)
 dbInfo = json.loads(dbResponse["SecretString"])
 logger.debug(f"Setting up SQL client")
-sqlClient = MySQLClient(os.environ["dbHost"], dbInfo["username"], dbInfo["password"], os.environ["dbName"])
+sqlClient = MySQLClient(dbHost, dbInfo["username"], dbInfo["password"], dbName)
 # create MyS3ChatHistory instance
 logger.debug(f"Setting up s3 client")
-s3Client = MyS3Client(awsSession, os.environ["s3Bucket"])
+s3Client = MyS3Client(awsSession, s3Bucket)
 # set up flask webapp
 logger.debug(f"Setting up webapp")
 app = Flask(__name__)
@@ -168,7 +205,7 @@ def index():
 def login():
     errorMessage = None
     # get users from rds
-    users = sqlClient.read_table(os.environ["userTable"])
+    users = sqlClient.read_table(userTable)
     # allow users to input username and password
     if request.method == "POST":
         username = request.form["username"]
@@ -225,7 +262,7 @@ def logout():
 @app.route("/signup", methods=["GET", "POST"])
 def signup():
     # get users from rds
-    users = sqlClient.read_table(os.environ["userTable"])
+    users = sqlClient.read_table(userTable)
     # allow users to input username, password, and email
     if request.method == "POST":
         newUsername = request.form["username"]
@@ -267,17 +304,17 @@ def signup():
             confirmEntry = {"username": newUsername, "token": token, "expiration": sqlExpire}
             confirmDeleteFilter = {"username": newUsername}
             # remove any existing signup info
-            sqlClient.delete_entry(confirmDeleteFilter, os.environ["confirmTable"])
+            sqlClient.delete_entry(confirmDeleteFilter, confirmTable)
             # add new user to db
-            sqlClient.add_entry(confirmEntry, os.environ["confirmTable"])
-            sqlClient.add_entry(userEntry, os.environ["userTable"])
+            sqlClient.add_entry(confirmEntry, confirmTable)
+            sqlClient.add_entry(userEntry, userTable)
             # create confirmation link
             with app.app_context():
                 confirmationUrl = url_for('confirm_email', token=token, _external=True)
             # make datetime more readable
             emailExpire = expire.strftime("%A, %B %d, %Y at %I:%M %p")
             # send email through SES
-            sender = os.environ["emailSender"]
+            sender = emailSender
             recipient = [newEmail]
             subject = "IX Cloud Signup Confirmation"
             body = f"""Hello {newUsername},
@@ -305,7 +342,7 @@ def confirm_email():
     # get token from url
     token = request.args.get("token")
     # get confirmation tokens from rds
-    confirmTokens = sqlClient.read_table(os.environ["confirmTable"])
+    confirmTokens = sqlClient.read_table(confirmTable)
     # check that the reset token exists
     tokenEntry = next((row for row in confirmTokens if row["token"] == token), None)
     # error if no token is in the url or it doesn't exist in the table or if the token is expired
@@ -318,9 +355,9 @@ def confirm_email():
     userUpdateFilter = {"username": tokenEntry["username"]}
     resetDeleteFilter = {"token": token}
     # update confirmation status for user in db
-    sqlClient.update_entry(userUpdateValue, userUpdateFilter, os.environ["userTable"])
+    sqlClient.update_entry(userUpdateValue, userUpdateFilter, userTable)
     # delete the token after successful reset
-    sqlClient.delete_entry(resetDeleteFilter, os.environ["confirmTable"])
+    sqlClient.delete_entry(resetDeleteFilter, confirmTable)
     logger.info(f"User {tokenEntry['username']} confirmed email")
     # render success page
     return render_template("confirm_email_success.html")
@@ -328,7 +365,7 @@ def confirm_email():
 @app.route("/forgot_password", methods=["GET", "POST"])
 def forgot_password():
     # get users from rds
-    users = sqlClient.read_table(os.environ["userTable"])
+    users = sqlClient.read_table(userTable)
     # allow users to input email
     if request.method == "POST":
         email = request.form["email"]
@@ -344,18 +381,18 @@ def forgot_password():
             # format user into dict with sql columns as keys
             resetDeleteFilter = {"username": matchedUser["username"]}
             # remove any existing reset info
-            sqlClient.delete_entry(resetDeleteFilter, os.environ["resetTable"])
+            sqlClient.delete_entry(resetDeleteFilter, resetTable)
             # format reset information into dict with sql columns as keys
             resetEntry = {"username": matchedUser["username"], "token": token, "expiration": sqlExpire}
             # add new reset info
-            sqlClient.add_entry(resetEntry, os.environ["resetTable"])
+            sqlClient.add_entry(resetEntry, resetTable)
             # send an email (implement using ses)
             with app.app_context():
                 resetUrl = url_for('reset_password', token=token, _external=True)
             # make datetime more readable
             emailExpire = expire.strftime("%A, %B %d, %Y at %I:%M %p")
             # send email through SES
-            sender = os.environ["emailSender"]
+            sender = emailSender
             recipient = [email]
             subject = "IX Cloud Password Reset Request"
             body = f"""Hello {matchedUser["username"]},
@@ -388,7 +425,7 @@ def reset_password():
     # get token from url
     token = request.args.get("token")
     # get reset tokens from rds
-    resetTokens = sqlClient.read_table(os.environ["resetTable"])
+    resetTokens = sqlClient.read_table(resetTable)
     # check that the reset token exists
     tokenEntry = next((row for row in resetTokens if row["token"] == token), None)
     # error if no token is in the url or it doesn't exist in the table or if the token is expired
@@ -424,9 +461,9 @@ def reset_password():
             userUpdateFilter = {"username": tokenEntry["username"]}
             resetDeleteFiler = {"token": token}
             # update password for user in db
-            sqlClient.update_entry(userUpdateValue, userUpdateFilter, os.environ["userTable"])
+            sqlClient.update_entry(userUpdateValue, userUpdateFilter, userTable)
             # delete the token after successful reset
-            sqlClient.delete_entry(resetDeleteFiler, os.environ["resetTable"])
+            sqlClient.delete_entry(resetDeleteFiler, resetTable)
             logger.info(f"User {tokenEntry['username']} reset password.")
             # render success page
             return render_template("reset_password_success.html")
@@ -440,7 +477,7 @@ def change_password():
         # if not, redirect back to login page
         return redirect(url_for("login", error="session_expired"))
     # get users from rds
-    users = sqlClient.read_table(os.environ["userTable"])
+    users = sqlClient.read_table(userTable)
     # get username when redirected to page
     username = session["username"]
     user = next((u for u in users if u["username"] == username), None)
@@ -469,7 +506,7 @@ def change_password():
             userUpdateValue  = {"password": hashedPassword}
             userUpdateFilter = {"username": username}
             # update password for user in db
-            sqlClient.update_entry(userUpdateValue, userUpdateFilter, os.environ["userTable"])
+            sqlClient.update_entry(userUpdateValue, userUpdateFilter, userTable)
             logger.info(f"User {username} changed password.")
             # redirect to login page
             return redirect(url_for("select_chat"))
@@ -506,15 +543,15 @@ def start_chat():
                     history = chat_from_obj(chatObj)
                 else:
                     logger.info(f"No previous chat found for {username}. Starting fresh.")
-            except:
+            except Exception as e:
                 logger.warning(f"Failed to load chat history for {username}: {e}")
         else:
             logger.info(f"User {username} has started a new chat.")
         # create a chatbot        
         userChatbots[username] = genaiClient.chats.create(
-            model=os.environ["geminiModel"],
+            model=geminiModel,
             history=history,
-            config=config
+            config=chatbotConfig
         )
     # Set last message time
     lastMessageTime[username] = time()
