@@ -50,3 +50,20 @@ class MyS3Client:
         except Exception as e:
             logger.error(f"Unexpected error looking up object with key {key}: {e}", exc_info=True)
             raise
+    def obj_list(self, key):
+        logger.debug(f"Listing objects in bucket: {self.bucket} under {key}")
+        # try to list objects in the bucket
+        try:
+            paginator = self.s3.get_paginator("list_objects_v2")
+            pageIterator = paginator.paginate(Bucket=self.bucket, Prefix=key)
+            # convert paginated list into a python list
+            objectKeys = []
+            for page in pageIterator:
+                for obj in page.get("Contents", []):
+                    if obj["Key"] != key:
+                        objectKeys.append(obj["Key"])
+            logger.debug(f"Found {len(objectKeys)} objects in bucket under {key}")
+            return objectKeys
+        except Exception as e:
+            logger.error(f"Error listing objects in bucket under {key}: {e}", exc_info=True)
+            raise
